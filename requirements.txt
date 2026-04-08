@@ -1,0 +1,6 @@
+# Painel de Rastreamento (Streamlit + Databricks)
+streamlit>=1.42
+pandas>=2.0
+altair>=5.0
+python-dotenv>=1.0
+databricks-sql-connector>=3.0

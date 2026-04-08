@@ -1,0 +1,13 @@
+.env
+credenciais/
+# Config local com IDs reais — use nuvem_envio_rastreio_config.example.json como modelo
+nuvem_envio_rastreio_config.json
+amostras/*.json
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.streamlit/secrets.toml
+*.csv
+.DS_Store

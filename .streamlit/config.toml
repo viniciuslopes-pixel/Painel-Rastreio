@@ -1,0 +1,12 @@
+# Tema claro por padrão (ignora preferência do sistema / modo escuro do navegador).
+[theme]
+base = "light"
+
+# Evita o navegador ficar em "Waiting for host" / não achar o servidor em alguns ambientes.
+[server]
+address = "127.0.0.1"
+port = 8501
+headless = true
+
+[browser]
+gatherUsageStats = false

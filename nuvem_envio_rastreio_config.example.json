@@ -1,0 +1,47 @@
+{
+  "_instrucoes": "Copie este arquivo para nuvem_envio_rastreio_config.json e substitua os placeholders pelos valores do seu Databricks/Zendesk. Brasil: campos de transportadoras + status_rastreamento; Argentina: tracking_numbers_data + status_rastreamento.",
+  "catalog_schema": "seu_catalogo.seu_schema_zendesk",
+  "dashboard_base_url": "",
+  "zendesk_ticket_url_template": "https://SUA_INSTANCIA.zendesk.com/agent/tickets/{ticket_id}",
+  "tabs": {
+    "brasil": {
+      "amostra_json_path": "",
+      "somente_com_rastreio_preenchido": true,
+      "bu_field_id": "SUBSTITUA_ID_CAMPO_BU",
+      "data_model": "br_three_carriers",
+      "zendesk_field_ids": {
+        "status_rastreamento": "SUBSTITUA_ID_STATUS",
+        "quantidade_rastreio_correios": "SUBSTITUA_ID_CORREIOS",
+        "quantidade_rastreio_jadlog": "SUBSTITUA_ID_JADLOG",
+        "quantidade_rastreio_loggi": "SUBSTITUA_ID_LOGGI",
+        "tracking_numbers_data": "SUBSTITUA_ID_TRACKING_JSON"
+      },
+      "filtro_grupo_contem": [
+        "grupo ou tag 1",
+        "grupo ou tag 2"
+      ],
+      "filtro_bu_contem": [
+        "valor_bu_1",
+        "valor_bu_2"
+      ]
+    },
+    "argentina": {
+      "amostra_json_path": "",
+      "somente_com_rastreio_preenchido": true,
+      "bu_field_id": "SUBSTITUA_ID_CAMPO_BU",
+      "data_model": "ar_tracking_single_field",
+      "zendesk_field_ids": {
+        "tracking_numbers_data": "SUBSTITUA_ID_TRACKING_JSON",
+        "status_rastreamento": "SUBSTITUA_ID_STATUS"
+      },
+      "filtro_grupo_contem": [
+        "grupo argentina 1",
+        "grupo argentina 2"
+      ],
+      "filtro_bu_contem": [
+        "valor_bu_1",
+        "valor_bu_2"
+      ]
+    }
+  }
+}
