@@ -2,10 +2,9 @@
 [theme]
 base = "light"
 
-# Evita o navegador ficar em "Waiting for host" / não achar o servidor em alguns ambientes.
+# Em produção (Streamlit Community Cloud) a plataforma define host/porta.
+# Localmente: use http://localhost:8501 ou, se precisar, `streamlit run ... --server.address 127.0.0.1`.
 [server]
-address = "127.0.0.1"
-port = 8501
 headless = true
 
 [browser]

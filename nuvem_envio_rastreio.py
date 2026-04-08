@@ -59,13 +59,61 @@ def _load_env_into_os() -> None:
         if env_path.is_file():
             load_dotenv(dotenv_path=env_path)
             break
+    _apply_streamlit_secrets_to_env()
+
+
+def _apply_streamlit_secrets_to_env() -> None:
+    """Preenche variáveis de ambiente a partir de st.secrets (Streamlit Community Cloud, etc.)."""
+    try:
+        import streamlit as st
+    except ImportError:
+        return
+    try:
+        sec = st.secrets
+    except Exception:
+        return
+    for key in ("databricks_host", "databricks_http_path", "databricks_token"):
+        try:
+            if key not in sec:
+                continue
+            val = str(sec[key]).strip()
+        except Exception:
+            continue
+        if val and not (os.environ.get(key) or "").strip():
+            os.environ[key] = val
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
-    p = path or (_DIR / "nuvem_envio_rastreio_config.json")
-    if not p.exists():
-        raise FileNotFoundError(f"Config não encontrado: {p}")
-    return json.loads(p.read_text(encoding="utf-8"))
+    """Carrega JSON de config: arquivo explícito, NUVEM_CONFIG_JSON, st.secrets ou arquivo padrão na raiz."""
+    if path is not None:
+        if not path.is_file():
+            raise FileNotFoundError(f"Config não encontrado: {path}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    env_json = (os.environ.get("NUVEM_CONFIG_JSON") or "").strip()
+    if env_json:
+        return json.loads(env_json)
+
+    try:
+        import streamlit as st
+
+        sec = st.secrets
+        if "nuvem_config_json" in sec:
+            raw = str(sec["nuvem_config_json"]).strip()
+            if raw:
+                return json.loads(raw)
+    except (ImportError, json.JSONDecodeError, KeyError, TypeError, RuntimeError, Exception):
+        pass
+
+    p = _DIR / "nuvem_envio_rastreio_config.json"
+    if p.is_file():
+        return json.loads(p.read_text(encoding="utf-8"))
+    raise FileNotFoundError(
+        "Config não encontrado: crie nuvem_envio_rastreio_config.json na raiz do projeto, "
+        "defina a variável de ambiente NUVEM_CONFIG_JSON com o JSON completo, "
+        "ou no Streamlit Cloud adicione o secret nuvem_config_json (JSON em uma linha ou TOML multilinha). "
+        "Veja README e .streamlit/secrets.example.toml."
+    )
 
 
 # Chaves herdadas de cada aba a partir da raiz do JSON (quando existe `tabs`).
@@ -319,8 +367,9 @@ def fetch_dataframe(
     http_path = (os.getenv("databricks_http_path") or "").strip()
     if not token or not host or not http_path:
         raise RuntimeError(
-            "Defina databricks_token, databricks_host e databricks_http_path no .env na raiz deste projeto "
-            "(veja .env.example e README; opcionalmente NUVEM_DOTENV_PATH para outro arquivo .env)."
+            "Defina databricks_token, databricks_host e databricks_http_path: arquivo .env na raiz "
+            "(veja .env.example), ou no Streamlit Community Cloud em Settings → Secrets "
+            "(mesmos nomes de chave). Opcional: NUVEM_DOTENV_PATH."
         )
 
     raw = config or load_config()

@@ -1918,7 +1918,7 @@ font-weight:800;letter-spacing:-0.03em;line-height:1.15;">
         </h1>
         <p style="margin:0.85rem auto 0 auto;color:{_NE_ACCENT};font-size:1.05rem;max-width:42rem;\
 line-height:1.45;text-align:center;">
-            Dados via Databricks (Zendesk). Mesmas credenciais do RobIA.
+            Dados via Databricks (Zendesk). Credenciais no arquivo <code>.env</code> na raiz do projeto.
         </p>
     </div>
     """,
