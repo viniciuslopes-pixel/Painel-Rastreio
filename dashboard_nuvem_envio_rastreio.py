@@ -1611,7 +1611,21 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             f"`zendesk_field_ids` para: {', '.join(missing)}."
         )
 
-    col1, col2, col3, col4 = st.columns(4)
+    if is_ar:
+        _cf_opts = list(_AR_CARRIER_ORDER) + [_AR_CARRIER_OTHER]
+        _cf_help = (
+            "Após carregar: exibe só tickets com **pelo menos um** código dessa transportadora "
+            "(JSON do app). Todas marcadas = sem filtro."
+        )
+    else:
+        _cf_opts = list(_BR_CARRIER_FILTER_LABELS)
+        _cf_help = (
+            "Após carregar: exibe só tickets com **quantidade > 0** na transportadora. "
+            "Várias = ticket entra se tiver volume em **qualquer uma**. Todas = sem filtro."
+        )
+
+    _sk_carrier = f"ne_{k}_carrier_filter"
+    col1, col2, col3, col4, col5 = st.columns([1.0, 1.0, 1.35, 0.82, 1.45])
     today = date.today()
     default_start = today - timedelta(days=14)
     with col1:
@@ -1635,6 +1649,14 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             step=1,
             key=f"ne_{k}_max_t",
             help="0 = sem limite (cuidado: consulta pesada). Para teste use 10.",
+        )
+    with col5:
+        st.multiselect(
+            "Transportadora",
+            options=_cf_opts,
+            default=list(_cf_opts),
+            key=_sk_carrier,
+            help=_cf_help,
         )
 
     _chk_help = (
@@ -1677,26 +1699,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
     filtro_txt = " + só com rastreio preenchido" if _meta.get("somente_rastreio") else ""
     _country_lbl = "Argentina · [AR] Envio Nube" if is_ar else "Brasil · Nuvem Envio"
 
-    if is_ar:
-        _cf_opts = list(_AR_CARRIER_ORDER) + [_AR_CARRIER_OTHER]
-        _cf_help = (
-            "Exibe só tickets que tenham **pelo menos um** código de rastreio dessa transportadora "
-            "(segundo o JSON do app)."
-        )
-    else:
-        _cf_opts = list(_BR_CARRIER_FILTER_LABELS)
-        _cf_help = (
-            "Exibe só tickets com **quantidade > 0** na transportadora. "
-            "Várias opções = ticket entra se tiver volume em **qualquer uma** delas."
-        )
-
-    _carrier_pick = st.multiselect(
-        "Filtrar por transportadora",
-        options=_cf_opts,
-        default=list(_cf_opts),
-        key=f"ne_{k}_carrier_filter",
-        help=_cf_help,
-    )
+    _carrier_pick = st.session_state.get(_sk_carrier, list(_cf_opts))
     _eff_carriers = _carrier_pick if _carrier_pick else list(_cf_opts)
     if len(_eff_carriers) == len(_cf_opts):
         df = df_loaded
