@@ -33,6 +33,8 @@ Dashboard Streamlit para acompanhamento operacional a partir de dados **Databric
 
 5. **Opcional:** JSON de amostra para drill-down nos gráficos — coloque em `amostras/` e defina `amostra_json_path` (ex.: `amostras/amostra.json`). Arquivos `amostras/*.json` não entram no Git.
 
+6. **Opcional — login no dashboard:** defina `DASHBOARD_PASSWORD` no `.env` (e, se quiser, `DASHBOARD_USER`). Na Streamlit Cloud use `dashboard_password` e `dashboard_user` nos **Secrets**. Sem senha configurada, o painel abre direto como antes. Use **Sair da sessão** na barra lateral para deslogar.
+
 ## Executar
 
 Na raiz do repositório:
@@ -66,7 +68,8 @@ O Vercel não hospeda Streamlit; o caminho mais simples é a [Streamlit Communit
 3. Em **Settings → Secrets**, cole um TOML com as credenciais do Databricks (veja modelo em `.streamlit/secrets.example.toml`):
    - `databricks_host`
    - `databricks_http_path`
-   - `databricks_token`
+   - `databricks_token`  
+   Opcional: `dashboard_password` (e `dashboard_user`) para tela de login antes do painel.
 4. **Config do painel (JSON), escolha um dos dois:**
    - **Secrets:** adicione `nuvem_config_json` com o **mesmo conteúdo** do seu `nuvem_envio_rastreio_config.json` (pode ser JSON em uma linha ou bloco multilinha em TOML); **ou**
    - **Arquivo no repo:** faça commit de `nuvem_envio_rastreio_config.json` (adequado para repo **privado**). Para forçar o commit apesar do `.gitignore`: `git add -f nuvem_envio_rastreio_config.json` (revise antes para não subir dados que não devem versionar).

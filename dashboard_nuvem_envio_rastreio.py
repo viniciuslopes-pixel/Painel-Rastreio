@@ -14,7 +14,9 @@ Brasil: três transportadoras + status por ticket. Argentina: [AR] Envio Nube, v
 """
 from __future__ import annotations
 
+import hmac
 import json
+import os
 import sys
 import urllib.parse
 from datetime import date, timedelta
@@ -38,6 +40,82 @@ import streamlit.components.v1 as components
 _NE_ACCENT = "#0050c3"
 _NE_ACCENT_HOVER = "#0040a0"
 _NE_PAGE_TITLE = "Painel de Rastreamento"
+
+
+def _ne_dashboard_login_expected() -> tuple[str | None, str | None]:
+    """(usuário_esperado_ou_None, senha_esperada). (None, None) = login desligado.
+
+    Ordem: variáveis de ambiente (após dotenv) → Streamlit Secrets.
+    Usuário é opcional; se definido, o campo usuário deve coincidir.
+    """
+    ne._load_env_into_os()
+    pw = (
+        (os.environ.get("NE_DASHBOARD_PASSWORD") or os.environ.get("DASHBOARD_PASSWORD") or "")
+        .strip()
+    )
+    user = (
+        (os.environ.get("NE_DASHBOARD_USER") or os.environ.get("DASHBOARD_USER") or "")
+        .strip()
+        or None
+    )
+    try:
+        sec = st.secrets
+        if not pw:
+            pw = str(sec.get("dashboard_password") or sec.get("DASHBOARD_PASSWORD") or "").strip()
+        if user is None:
+            u = str(sec.get("dashboard_user") or sec.get("DASHBOARD_USER") or "").strip()
+            if u:
+                user = u
+    except Exception:
+        pass
+    if not pw:
+        return None, None
+    return user, pw
+
+
+def _ne_ensure_dashboard_auth() -> None:
+    """Exige login quando há senha configurada; caso contrário segue sem tela."""
+    expected_user, expected_pw = _ne_dashboard_login_expected()
+    if not expected_pw:
+        return
+    if st.session_state.get("ne_auth_ok"):
+        return
+
+    st.markdown(
+        f"""
+        <div style="max-width:420px;margin:3rem auto 1.5rem auto;text-align:center;">
+            <h1 style="color:{html.escape(_NE_ACCENT)};font-size:1.65rem;font-weight:800;margin:0;">
+                {_NE_PAGE_TITLE}
+            </h1>
+            <p style="color:#475569;margin-top:0.75rem;font-size:1rem;">Acesso restrito</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.form("ne_login_form", clear_on_submit=False):
+        typed_user = ""
+        if expected_user is not None:
+            typed_user = st.text_input("Usuário", key="ne_login_user")
+        typed_pw = st.text_input("Senha", type="password", key="ne_login_pw")
+        submitted = st.form_submit_button("Entrar", type="primary")
+
+    if submitted:
+        ok_u = True
+        if expected_user is not None:
+            ok_u = hmac.compare_digest(
+                typed_user.strip().encode("utf-8"),
+                expected_user.encode("utf-8"),
+            )
+        ok_p = hmac.compare_digest(
+            typed_pw.encode("utf-8"),
+            expected_pw.encode("utf-8"),
+        )
+        if ok_u and ok_p:
+            st.session_state["ne_auth_ok"] = True
+            st.rerun()
+        st.error("Usuário ou senha incorretos.")
+
+    st.stop()
 
 
 def _ne_truck_icon_data_uri() -> str:
@@ -1358,6 +1436,112 @@ def _css_country_tabs_ne() -> str:
     """
 
 
+def _ne_pick_qty_col(df: pd.DataFrame, base: str) -> str | None:
+    """Prefere coluna *_num (inteiro) quando existir."""
+    num = f"{base}_num"
+    if num in df.columns:
+        return num
+    if base in df.columns:
+        return base
+    return None
+
+
+def _ne_sample_column_order(df: pd.DataFrame, is_ar: bool) -> list[str]:
+    """Colunas da tabela amostra: foco em ticket + rastreio, sem BU nem colunas técnicas extras."""
+    out: list[str] = []
+    for c in ("ticket_id", "status", "grupo"):
+        if c in df.columns:
+            out.append(c)
+    if "total_qtd_rastreio" in df.columns:
+        out.append("total_qtd_rastreio")
+    if is_ar:
+        for c in ("tracking_numbers_data", "status_rastreamento"):
+            if c in df.columns:
+                out.append(c)
+    else:
+        for base in (
+            "quantidade_rastreio_correios",
+            "quantidade_rastreio_jadlog",
+            "quantidade_rastreio_loggi",
+        ):
+            picked = _ne_pick_qty_col(df, base)
+            if picked:
+                out.append(picked)
+        for c in ("status_rastreamento", "tracking_numbers_data"):
+            if c in df.columns:
+                out.append(c)
+    for c in ("created_at", "updated_at"):
+        if c in df.columns:
+            out.append(c)
+    return out
+
+
+def _ne_truncate_sample_text(val: object, max_len: int = 180) -> str:
+    try:
+        if val is None or (pd.api.types.is_scalar(val) and pd.isna(val)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "null", "{}"):
+        return ""
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
+def _ne_prepare_sample_display_df(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    use = [c for c in cols if c in df.columns]
+    sub = df.loc[:, use].head(500).copy()
+    for col in ("tracking_numbers_data", "status_rastreamento"):
+        if col in sub.columns:
+            sub[col] = sub[col].map(_ne_truncate_sample_text)
+    return sub
+
+
+def _ne_sample_column_config(cols: list[str]) -> dict[str, object]:
+    """Rótulos amigáveis e tipos para a tabela amostra."""
+    labels: dict[str, str] = {
+        "ticket_id": "Ticket",
+        "status": "Status do ticket",
+        "grupo": "Grupo",
+        "total_qtd_rastreio": "Total de códigos",
+        "quantidade_rastreio_correios": "Correios",
+        "quantidade_rastreio_correios_num": "Correios",
+        "quantidade_rastreio_jadlog": "Jadlog",
+        "quantidade_rastreio_jadlog_num": "Jadlog",
+        "quantidade_rastreio_loggi": "Loggi",
+        "quantidade_rastreio_loggi_num": "Loggi",
+        "status_rastreamento": "Situação por código (JSON)",
+        "tracking_numbers_data": "Dados de rastreio (JSON)",
+        "created_at": "Criado em",
+        "updated_at": "Atualizado em",
+    }
+    cfg: dict[str, object] = {}
+    for c in cols:
+        label = labels.get(c, c.replace("_", " ").title())
+        if c in ("created_at", "updated_at"):
+            cfg[c] = st.column_config.DatetimeColumn(
+                label,
+                format="DD/MM/YYYY HH:mm",
+            )
+        elif c == "total_qtd_rastreio" or c.endswith("_num") or "quantidade_rastreio" in c:
+            cfg[c] = st.column_config.NumberColumn(
+                label, format="%d", help="Quantidade na amostra"
+            )
+        elif c in ("tracking_numbers_data", "status_rastreamento"):
+            cfg[c] = st.column_config.TextColumn(
+                label,
+                width="large",
+                help="Texto abreviado na tela; exporte o CSV para o conteúdo completo.",
+            )
+        elif c == "ticket_id":
+            cfg[c] = st.column_config.TextColumn(label, width="small")
+        else:
+            cfg[c] = st.column_config.TextColumn(label)
+    return cfg
+
+
 def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
     """Conteúdo de uma aba (Brasil ou Argentina): filtros, métricas, gráficos, tabela, CSV."""
     cfg = ne.effective_config_for_tab(raw_cfg, tab_key)
@@ -1844,41 +2028,23 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 "Se o problema continuar, envie um exemplo anonimizado para ajustarmos a leitura."
             )
 
-    st.subheader("Amostra")
-    if is_ar:
-        _pref = [
-            "ticket_id",
-            "total_qtd_rastreio",
-            "tracking_numbers_data",
-            "status_rastreamento",
-            "status",
-            "grupo",
-            "bu",
-            "created_at",
-            "updated_at",
-        ]
-    else:
-        _pref = [
-            "ticket_id",
-            "total_qtd_rastreio",
-            "quantidade_rastreio_correios",
-            "quantidade_rastreio_jadlog",
-            "quantidade_rastreio_loggi",
-            "status_rastreamento",
-            "tracking_numbers_data",
-            "status",
-            "grupo",
-            "bu",
-            "created_at",
-            "updated_at",
-        ]
-    _cols = [c for c in _pref if c in df.columns]
-    _cols.extend(c for c in df.columns if c not in _cols)
-    st.dataframe(
-        df[_cols].head(500),
-        use_container_width=True,
-        hide_index=True,
+    st.subheader("Amostra de tickets")
+    st.caption(
+        "Ordem pensada para leitura: **ticket → totais → transportadoras / JSON de rastreio → datas**. "
+        "Campos JSON longos vêm **abreviados** na tela; o botão de CSV traz o texto completo."
     )
+    _sam_cols = _ne_sample_column_order(df, is_ar)
+    if not _sam_cols:
+        st.info("Não há colunas para montar a amostra.")
+    else:
+        _disp = _ne_prepare_sample_display_df(df, _sam_cols)
+        _cc = _ne_sample_column_config(list(_disp.columns))
+        st.dataframe(
+            _disp,
+            use_container_width=True,
+            hide_index=True,
+            column_config=_cc,
+        )
 
     with st.expander("Ideias de medição e acompanhamento"):
         st.markdown(
@@ -1903,6 +2069,12 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
 
 st.set_page_config(page_title=_NE_PAGE_TITLE, layout="wide")
 _inject_ne_theme()
+_ne_ensure_dashboard_auth()
+with st.sidebar:
+    if st.session_state.get("ne_auth_ok"):
+        if st.button("Sair da sessão", key="ne_logout_btn", help="Encerra o login neste navegador."):
+            st.session_state.pop("ne_auth_ok", None)
+            st.rerun()
 raw_cfg = ne.load_config()
 _run_pending_ne_fetch(raw_cfg)
 _ne_qp_ticket = _query_param_first("ne_ticket")
