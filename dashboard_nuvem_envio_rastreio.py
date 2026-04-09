@@ -552,6 +552,52 @@ def _ar_carrier_volume_df(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([{"transportadora": k, "volume_solicitacoes": vol[k]} for k in keys])
 
 
+_BR_CARRIER_FILTER_LABELS = ("Correios", "Jadlog", "Loggi")
+
+
+def _ne_filter_df_br_carriers(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
+    """Mantém tickets com quantidade > 0 em ao menos uma das transportadoras selecionadas."""
+    if df.empty or not selected:
+        return df
+    col_map = {
+        "Correios": ("quantidade_rastreio_correios_num", "quantidade_rastreio_correios"),
+        "Jadlog": ("quantidade_rastreio_jadlog_num", "quantidade_rastreio_jadlog"),
+        "Loggi": ("quantidade_rastreio_loggi_num", "quantidade_rastreio_loggi"),
+    }
+    mask = pd.Series(False, index=df.index)
+    for lab in selected:
+        pair = col_map.get(lab)
+        if not pair:
+            continue
+        num, raw = pair
+        if num in df.columns:
+            mask |= pd.to_numeric(df[num], errors="coerce").fillna(0) > 0
+        elif raw in df.columns:
+            mask |= pd.to_numeric(df[raw], errors="coerce").fillna(0) > 0
+    return df.loc[mask].copy()
+
+
+def _ne_filter_df_ar_carriers(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
+    """Mantém tickets com ao menos um segmento em `tracking_numbers_data` da transportadora."""
+    if df.empty or not selected:
+        return df
+    if "tracking_numbers_data" not in df.columns:
+        return df.iloc[0:0].copy()
+    sel = set(selected)
+
+    def _row_ok(row: pd.Series) -> bool:
+        items = _parse_tracking_numbers_app_json(row.get("tracking_numbers_data"))
+        if not items:
+            return _AR_CARRIER_OTHER in sel
+        for it in items:
+            if _ar_canonical_carrier(_tracking_display_carrier(it)) in sel:
+                return True
+        return False
+
+    m = df.apply(_row_ok, axis=1)
+    return df.loc[m].copy()
+
+
 def _ne_html_stacked_carriers_volume(
     vol_df: pd.DataFrame,
     carrier_style: dict[str, tuple[str, str, str]],
@@ -1622,18 +1668,56 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             }
             st.rerun()
 
-    df = st.session_state.get(sk_df)
-    if df is None or df.empty:
+    df_loaded = st.session_state.get(sk_df)
+    if df_loaded is None or df_loaded.empty:
         st.info("Clique em **Atualizar dados** para carregar. Período padrão: últimas 2 semanas.")
         return
 
     _meta = st.session_state.get(sk_meta) or {}
     filtro_txt = " + só com rastreio preenchido" if _meta.get("somente_rastreio") else ""
     _country_lbl = "Argentina · [AR] Envio Nube" if is_ar else "Brasil · Nuvem Envio"
-    st.success(
-        f"**{len(df)}** tickets ({_country_lbl}{filtro_txt}). "
-        "Ordenados por **total** (maior primeiro)."
+
+    if is_ar:
+        _cf_opts = list(_AR_CARRIER_ORDER) + [_AR_CARRIER_OTHER]
+        _cf_help = (
+            "Exibe só tickets que tenham **pelo menos um** código de rastreio dessa transportadora "
+            "(segundo o JSON do app)."
+        )
+    else:
+        _cf_opts = list(_BR_CARRIER_FILTER_LABELS)
+        _cf_help = (
+            "Exibe só tickets com **quantidade > 0** na transportadora. "
+            "Várias opções = ticket entra se tiver volume em **qualquer uma** delas."
+        )
+
+    _carrier_pick = st.multiselect(
+        "Filtrar por transportadora",
+        options=_cf_opts,
+        default=list(_cf_opts),
+        key=f"ne_{k}_carrier_filter",
+        help=_cf_help,
     )
+    _eff_carriers = _carrier_pick if _carrier_pick else list(_cf_opts)
+    if len(_eff_carriers) == len(_cf_opts):
+        df = df_loaded
+    else:
+        df = (
+            _ne_filter_df_ar_carriers(df_loaded, _eff_carriers)
+            if is_ar
+            else _ne_filter_df_br_carriers(df_loaded, _eff_carriers)
+        )
+
+    if len(df) == len(df_loaded):
+        st.success(
+            f"**{len(df)}** tickets ({_country_lbl}{filtro_txt}). "
+            "Ordenados por **total** (maior primeiro)."
+        )
+    else:
+        st.success(
+            f"**{len(df)}** tickets exibidos (de **{len(df_loaded)}** carregados) "
+            f"com filtro de transportadora · {_country_lbl}{filtro_txt}. "
+            "Ordenados por **total** (maior primeiro)."
+        )
 
     def _total_tres_transportadoras(frame: pd.DataFrame) -> float:
         s = 0.0
