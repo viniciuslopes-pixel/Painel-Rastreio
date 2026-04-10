@@ -858,14 +858,44 @@ def _chart_ticket_href(ticket_id: str, cfg: dict, tab_key: str) -> str | None:
     return None
 
 
-def _chart_status_ticket_href(ticket_id: str, tab_key: str, cfg: dict) -> str:
-    """Abre o painel de códigos + agente ao clicar no gráfico de status por ticket (?ne_codes=1)."""
-    tid = _norm_ticket_id(ticket_id)
-    q = urllib.parse.urlencode({"ne_ticket": tid, "ne_tab": tab_key, "ne_codes": "1"})
-    base = str(cfg.get("dashboard_base_url") or "").strip().rstrip("/")
-    if base:
-        return f"{base}?{q}"
-    return f"?{q}"
+def _ticket_id_from_vega_selection(evt: object | None, param_name: str) -> str | None:
+    """Lê ticket_id do retorno de st.altair_chart(..., on_select='rerun')."""
+    if evt is None:
+        return None
+    try:
+        sel = evt.selection if hasattr(evt, "selection") else evt.get("selection")  # type: ignore[union-attr]
+    except Exception:
+        return None
+    if sel is None:
+        return None
+    try:
+        blk = getattr(sel, param_name, None)
+        if blk is None and hasattr(sel, "get"):
+            blk = sel.get(param_name)  # type: ignore[union-attr]
+    except Exception:
+        blk = None
+    if blk is None:
+        return None
+    if isinstance(blk, list):
+        if not blk:
+            return None
+        row0 = blk[0]
+        if isinstance(row0, dict) and row0.get("ticket_id") is not None:
+            v = row0["ticket_id"]
+            if isinstance(v, list) and v:
+                return _norm_ticket_id(v[0])
+            return _norm_ticket_id(v)
+        return None
+    if isinstance(blk, dict):
+        v = blk.get("ticket_id")
+        if v is None:
+            return None
+        if isinstance(v, list):
+            if not v:
+                return None
+            return _norm_ticket_id(v[0])
+        return _norm_ticket_id(v)
+    return None
 
 
 def _format_messages_preview(ticket: dict, max_chars: int = 12_000) -> str:
@@ -985,10 +1015,10 @@ def _codes_guru_detail_records(raw_tracking: object) -> list[dict[str, object]]:
     return rows
 
 
-def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str) -> None:
+def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str) -> None:
     """Painel após clique no gráfico de status: códigos + guru (agentName) por linha do JSON."""
     tid = _norm_ticket_id(ticket_id)
-    tab = _query_param_first("ne_tab") or "brasil"
+    tab = tab_key if tab_key in ("brasil", "argentina") else "brasil"
     try:
         cfg = ne.effective_config_for_tab(raw_cfg, tab)
     except (KeyError, ValueError):
@@ -1006,12 +1036,14 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str) -> None:
     with c2:
         if st.button(
             "Fechar",
-            key="ne_close_codes_panel",
-            help="Remove o painel e os parâmetros da URL.",
+            key=f"ne_close_codes_{tab}",
+            help="Fecha o painel sem recarregar a página inteira (mantém login e dados carregados).",
         ):
-            for key in ("ne_ticket", "ne_codes"):
-                if key in st.query_params:
-                    del st.query_params[key]
+            st.session_state.pop("ne_codes_ticket", None)
+            st.session_state.pop("ne_codes_tab", None)
+            st.session_state[f"ne_chart_reset_{tab}"] = int(
+                st.session_state.get(f"ne_chart_reset_{tab}", 0)
+            ) + 1
             st.rerun()
 
     sk_df = f"ne_df_{tab}"
@@ -2006,8 +2038,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             st.caption(
                 "Cada linha é um ticket. A barra mostra **quantos códigos de rastreio** há em cada tipo de situação "
                 "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**. "
-                "**Clique numa barra** para abrir o detalhe: cada código em **tracking_numbers_data** e o **agente** "
-                "que atualizou (**agentName**)."
+                "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
+                "cada código em **tracking_numbers_data** e o **agente** (**agentName**)."
             )
             _top_status = st.number_input(
                 "Quantidade de tickets neste gráfico",
@@ -2023,10 +2055,11 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 st.info("Não há barras para exibir: neste recorte não há códigos com situação para mostrar.")
             else:
                 _long_status = _long_status.copy()
-                _long_status["ne_href"] = _long_status["ticket_id"].astype(str).map(
-                    lambda tid: _chart_status_ticket_href(tid, k, cfg)
-                )
                 _h_status = max(280, min(900, len(_ticket_order_status) * 28))
+                _pick = alt.selection_point(
+                    fields=["ticket_id"],
+                    name="ne_status_bar_pick",
+                )
                 _enc_status = dict(
                     x=alt.X("qtd:Q", stack="zero", title="Quantidade de códigos de rastreio"),
                     y=alt.Y("ticket_id:N", title="Ticket", sort=_ticket_order_status),
@@ -2039,6 +2072,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                         legend=alt.Legend(title="Situação"),
                     ),
                     order=alt.Order("ord:Q", sort="ascending"),
+                    fillOpacity=alt.condition(_pick, alt.value(1.0), alt.value(0.68)),
                     tooltip=[
                         alt.Tooltip("ticket_id:N", title="Ticket"),
                         alt.Tooltip("categoria:N", title="Situação"),
@@ -2048,13 +2082,25 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 _status_chart = (
                     alt.Chart(_long_status)
                     .mark_bar(cornerRadiusEnd=2, cursor="pointer")
-                    .encode(
-                        **_enc_status,
-                        href=alt.Href("ne_href:N"),
-                    )
+                    .encode(**_enc_status)
+                    .add_params(_pick)
                     .properties(height=_h_status)
                 )
-                st.altair_chart(_status_chart, use_container_width=True)
+                _chart_reset = int(st.session_state.get(f"ne_chart_reset_{k}", 0))
+                _evt = st.altair_chart(
+                    _status_chart,
+                    key=f"ne_status_chart_{k}_{_chart_reset}",
+                    on_select="rerun",
+                    width="stretch",
+                )
+                _clicked_tid = _ticket_id_from_vega_selection(_evt, "ne_status_bar_pick")
+                if _clicked_tid:
+                    _cur = st.session_state.get("ne_codes_ticket")
+                    _cur_tab = st.session_state.get("ne_codes_tab")
+                    if _norm_ticket_id(str(_cur or "")) != _clicked_tid or _cur_tab != k:
+                        st.session_state["ne_codes_ticket"] = _clicked_tid
+                        st.session_state["ne_codes_tab"] = k
+                        st.rerun()
 
     if is_ar:
         st.subheader("Volume por transportadora (Argentina)")
@@ -2325,8 +2371,21 @@ _run_pending_ne_fetch(raw_cfg)
 _ne_qp_ticket = _query_param_first("ne_ticket")
 _ne_qp_codes = _query_param_first("ne_codes")
 _ne_open_codes_panel = str(_ne_qp_codes or "").strip().lower() in ("1", "true", "yes")
+# Links antigos (?ne_codes=1): copia para sessão e limpa a URL (evita recarregar página / perder login)
 if _ne_qp_ticket and _ne_open_codes_panel:
-    _render_ticket_codes_guru_panel(raw_cfg, _ne_qp_ticket)
+    st.session_state["ne_codes_ticket"] = _norm_ticket_id(_ne_qp_ticket)
+    st.session_state["ne_codes_tab"] = _query_param_first("ne_tab") or "brasil"
+    for _qk in ("ne_ticket", "ne_codes"):
+        if _qk in st.query_params:
+            del st.query_params[_qk]
+    st.rerun()
+
+_ne_codes_tid = st.session_state.get("ne_codes_ticket")
+_ne_codes_tab = st.session_state.get("ne_codes_tab")
+if _ne_codes_tid and _ne_codes_tab:
+    _render_ticket_codes_guru_panel(
+        raw_cfg, str(_ne_codes_tid), str(_ne_codes_tab)
+    )
 elif _ne_qp_ticket:
     _render_amostra_ticket_panel(raw_cfg, _ne_qp_ticket)
 
