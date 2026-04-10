@@ -10,7 +10,8 @@ Execução (na raiz deste repositório):
 Antes: preencha zendesk_field_ids em nuvem_envio_rastreio_config.json
 (use sql_descobrir_campos_rastreio.sql no Databricks para achar os IDs).
 Abas **Brasil** e **Argentina** em nuvem_envio_rastreio_config.json → `tabs`.
-Brasil: três transportadoras + status por ticket. Argentina: [AR] Envio Nube, volume e tempo por envio. Clique: ?ne_ticket= e ?ne_tab=brasil|argentina.
+Brasil: três transportadoras + status por ticket. Argentina: [AR] Envio Nube, volume e tempo por envio.
+Clique no gráfico de status: ?ne_codes=1 mostra códigos + agentName (tracking_numbers_data). Amostra: ?ne_ticket= + ne_tab.
 """
 from __future__ import annotations
 
@@ -472,6 +473,34 @@ def _tracking_display_carrier(it: dict) -> str:
     return ""
 
 
+def _tracking_agent_name(it: dict) -> str:
+    """Nome do agente/guru que atualizou o código (ex.: agentName no JSON do app)."""
+    for key in (
+        "agentName",
+        "agent_name",
+        "guruName",
+        "guru_name",
+        "updatedBy",
+        "updated_by",
+        "userName",
+        "user_name",
+        "authorName",
+        "author",
+    ):
+        v = it.get(key)
+        if v is None:
+            continue
+        try:
+            if pd.api.types.is_scalar(v) and pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        t = str(v).strip()
+        if t and t.lower() not in ("null", "none", "nan", "{}"):
+            return t
+    return "—"
+
+
 def _tracking_segment_end_timestamp(it: dict) -> object | None:
     """Instante de término do segmento: app Argentina usa `finalizadoAt`; fallback `completedAt`."""
     for key in ("finalizadoAt", "finalizado_at", "completedAt", "completed_at"):
@@ -829,6 +858,16 @@ def _chart_ticket_href(ticket_id: str, cfg: dict, tab_key: str) -> str | None:
     return None
 
 
+def _chart_status_ticket_href(ticket_id: str, tab_key: str, cfg: dict) -> str:
+    """Abre o painel de códigos + agente ao clicar no gráfico de status por ticket (?ne_codes=1)."""
+    tid = _norm_ticket_id(ticket_id)
+    q = urllib.parse.urlencode({"ne_ticket": tid, "ne_tab": tab_key, "ne_codes": "1"})
+    base = str(cfg.get("dashboard_base_url") or "").strip().rstrip("/")
+    if base:
+        return f"{base}?{q}"
+    return f"?{q}"
+
+
 def _format_messages_preview(ticket: dict, max_chars: int = 12_000) -> str:
     msgs = ticket.get("messages")
     if not isinstance(msgs, list):
@@ -866,8 +905,9 @@ def _render_amostra_ticket_panel(raw_cfg: dict, ticket_id: str) -> None:
     _, c2 = st.columns([4, 1])
     with c2:
         if st.button("Fechar", key="ne_close_ticket_panel", help="Remove o filtro do ticket na URL"):
-            if "ne_ticket" in st.query_params:
-                del st.query_params["ne_ticket"]
+            for key in ("ne_ticket", "ne_codes"):
+                if key in st.query_params:
+                    del st.query_params[key]
             st.rerun()
     if path is None:
         rel = str(cfg.get("amostra_json_path") or "").strip()
@@ -910,6 +950,132 @@ def _render_amostra_ticket_panel(raw_cfg: dict, ticket_id: str) -> None:
         key=f"ne_amostra_tx_{tab}_{tid}",
         label_visibility="visible",
     )
+    zurl = str(cfg.get("zendesk_ticket_url_template") or "").strip()
+    if zurl and "{ticket_id}" in zurl:
+        st.link_button("Abrir ticket no Zendesk (agente)", zurl.format(ticket_id=tid))
+
+
+def _df_row_for_ticket_id(df: pd.DataFrame | None, tid: str) -> pd.Series | None:
+    if df is None or df.empty or "ticket_id" not in df.columns:
+        return None
+    want = _norm_ticket_id(tid)
+    norm = df["ticket_id"].astype(str).map(_norm_ticket_id)
+    m = norm == want
+    if not bool(m.any()):
+        return None
+    return df.loc[m].iloc[0]
+
+
+def _codes_guru_detail_records(raw_tracking: object) -> list[dict[str, object]]:
+    """Uma entrada por item em tracking_numbers_data: código, agente, transportadora."""
+    items = _parse_tracking_numbers_app_json(raw_tracking)
+    rows: list[dict[str, object]] = []
+    for i, it in enumerate(items, start=1):
+        code_full = _tracking_display_code(it) or f"(sem código #{i})"
+        code_disp = code_full if len(code_full) <= 72 else code_full[:71] + "…"
+        rows.append(
+            {
+                "n": i,
+                "codigo": code_disp,
+                "codigo_full": code_full,
+                "guru": _tracking_agent_name(it),
+                "transportadora": _tracking_display_carrier(it) or "—",
+            }
+        )
+    return rows
+
+
+def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str) -> None:
+    """Painel após clique no gráfico de status: códigos + guru (agentName) por linha do JSON."""
+    tid = _norm_ticket_id(ticket_id)
+    tab = _query_param_first("ne_tab") or "brasil"
+    try:
+        cfg = ne.effective_config_for_tab(raw_cfg, tab)
+    except (KeyError, ValueError):
+        tab = "brasil"
+        cfg = raw_cfg
+
+    st.markdown(
+        f'<div style="border-left:4px solid {_NE_ACCENT};padding:0.75rem 1rem;margin:0.5rem 0 1rem 0;'
+        f'background:#f0fdf4;border-radius:8px;">'
+        f"<strong>Códigos de rastreio no ticket</strong> · <code>{html.escape(tid)}</code> "
+        f"· aba <strong>{html.escape(tab)}</strong></div>",
+        unsafe_allow_html=True,
+    )
+    _, c2 = st.columns([4, 1])
+    with c2:
+        if st.button(
+            "Fechar",
+            key="ne_close_codes_panel",
+            help="Remove o painel e os parâmetros da URL.",
+        ):
+            for key in ("ne_ticket", "ne_codes"):
+                if key in st.query_params:
+                    del st.query_params[key]
+            st.rerun()
+
+    sk_df = f"ne_df_{tab}"
+    df = st.session_state.get(sk_df)
+    row = _df_row_for_ticket_id(df, tid)
+    if row is None:
+        st.warning(
+            "Este ticket **não está** nos dados já carregados nesta aba. "
+            "Abra a aba correta (**Brasil** ou **Argentina**), clique em **Atualizar dados** e clique de novo na barra do gráfico."
+        )
+        zurl = str(cfg.get("zendesk_ticket_url_template") or "").strip()
+        if zurl and "{ticket_id}" in zurl:
+            st.link_button("Abrir no Zendesk (agente)", zurl.format(ticket_id=tid))
+        return
+
+    if "tracking_numbers_data" not in row.index:
+        st.error("Não há coluna **tracking_numbers_data** neste recorte.")
+        return
+
+    recs = _codes_guru_detail_records(row.get("tracking_numbers_data"))
+    if not recs:
+        st.info(
+            "Não foi possível ler códigos em **tracking_numbers_data** (lista vazia ou formato não reconhecido)."
+        )
+        return
+
+    plot_df = pd.DataFrame(recs)
+    plot_df["_bar"] = 1
+    plot_df["rotulo"] = (
+        plot_df["n"].astype(str) + " · " + plot_df["codigo"].astype(str).str.slice(0, 36)
+    )
+    _y_order = plot_df.sort_values("n")["rotulo"].astype(str).tolist()
+
+    st.subheader("Por código: quem atualizou (agentName)")
+    st.caption(
+        "Cada barra é um código do JSON **tracking_numbers_data**. A cor é o **agente** "
+        "(campo **agentName** ou equivalente no objeto)."
+    )
+    _cg_chart = (
+        alt.Chart(plot_df)
+        .mark_bar(cornerRadiusEnd=2)
+        .encode(
+            x=alt.X("_bar:Q", title=None, axis=None),
+            y=alt.Y("rotulo:N", title="", sort=_y_order),
+            color=alt.Color("guru:N", title="Agente"),
+            tooltip=[
+                alt.Tooltip("codigo_full:N", title="Código"),
+                alt.Tooltip("guru:N", title="Agente"),
+                alt.Tooltip("transportadora:N", title="Transportadora"),
+            ],
+        )
+        .properties(height=max(200, min(560, 26 * len(plot_df))))
+    )
+    st.altair_chart(_cg_chart, use_container_width=True)
+
+    _tbl = plot_df[["codigo_full", "guru", "transportadora"]].rename(
+        columns={
+            "codigo_full": "Código de rastreio",
+            "guru": "Agente (agentName)",
+            "transportadora": "Transportadora",
+        }
+    )
+    st.dataframe(_tbl, use_container_width=True, hide_index=True)
+
     zurl = str(cfg.get("zendesk_ticket_url_template") or "").strip()
     if zurl and "{ticket_id}" in zurl:
         st.link_button("Abrir ticket no Zendesk (agente)", zurl.format(ticket_id=tid))
@@ -1839,7 +2005,9 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             st.subheader("Status de rastreamento por ticket")
             st.caption(
                 "Cada linha é um ticket. A barra mostra **quantos códigos de rastreio** há em cada tipo de situação "
-                "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**."
+                "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**. "
+                "**Clique numa barra** para abrir o detalhe: cada código em **tracking_numbers_data** e o **agente** "
+                "que atualizou (**agentName**)."
             )
             _top_status = st.number_input(
                 "Quantidade de tickets neste gráfico",
@@ -1855,10 +2023,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 st.info("Não há barras para exibir: neste recorte não há códigos com situação para mostrar.")
             else:
                 _long_status = _long_status.copy()
-                _long_status["ne_href"] = (
-                    _long_status["ticket_id"].astype(str).map(
-                        lambda tid: _chart_ticket_href(tid, cfg, k) or ""
-                    )
+                _long_status["ne_href"] = _long_status["ticket_id"].astype(str).map(
+                    lambda tid: _chart_status_ticket_href(tid, k, cfg)
                 )
                 _h_status = max(280, min(900, len(_ticket_order_status) * 28))
                 _enc_status = dict(
@@ -1879,23 +2045,15 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                         alt.Tooltip("qtd:Q", title="Quantidade", format=".0f"),
                     ],
                 )
-                if _long_status["ne_href"].astype(str).str.len().gt(0).any():
-                    _status_chart = (
-                        alt.Chart(_long_status)
-                        .mark_bar(cornerRadiusEnd=2, cursor="pointer")
-                        .encode(
-                            **_enc_status,
-                            href=alt.Href("ne_href:N"),
-                        )
-                        .properties(height=_h_status)
+                _status_chart = (
+                    alt.Chart(_long_status)
+                    .mark_bar(cornerRadiusEnd=2, cursor="pointer")
+                    .encode(
+                        **_enc_status,
+                        href=alt.Href("ne_href:N"),
                     )
-                else:
-                    _status_chart = (
-                        alt.Chart(_long_status)
-                        .mark_bar(cornerRadiusEnd=2)
-                        .encode(**_enc_status)
-                        .properties(height=_h_status)
-                    )
+                    .properties(height=_h_status)
+                )
                 st.altair_chart(_status_chart, use_container_width=True)
 
     if is_ar:
@@ -2165,7 +2323,11 @@ with st.sidebar:
 raw_cfg = ne.load_config()
 _run_pending_ne_fetch(raw_cfg)
 _ne_qp_ticket = _query_param_first("ne_ticket")
-if _ne_qp_ticket:
+_ne_qp_codes = _query_param_first("ne_codes")
+_ne_open_codes_panel = str(_ne_qp_codes or "").strip().lower() in ("1", "true", "yes")
+if _ne_qp_ticket and _ne_open_codes_panel:
+    _render_ticket_codes_guru_panel(raw_cfg, _ne_qp_ticket)
+elif _ne_qp_ticket:
     _render_amostra_ticket_panel(raw_cfg, _ne_qp_ticket)
 
 st.markdown(
