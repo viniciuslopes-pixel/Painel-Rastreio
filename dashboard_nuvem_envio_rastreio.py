@@ -146,6 +146,15 @@ footer {{ visibility: hidden !important; height: 0 !important; }}
   border-color: {blue} !important;
   box-shadow: 0 0 0 1px {blue} !important;
 }}
+/* Dica "Press Enter to submit form" (InputInstructions) — login só precisa do botão Entrar */
+[data-testid="stForm"] [data-testid="InputInstructions"] {{
+  display: none !important;
+  visibility: hidden !important;
+  height: 0 !important;
+  overflow: hidden !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}}
 /* Botão Entrar — Streamlit usa div[data-testid=stForm] + button[data-testid=stBaseButton-primaryFormSubmit] */
 [data-testid="stForm"] .stButton,
 [data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
