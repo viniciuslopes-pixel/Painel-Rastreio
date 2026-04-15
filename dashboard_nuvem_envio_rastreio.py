@@ -411,12 +411,54 @@ def _tracking_status_buckets_for_row(row: pd.Series) -> dict[str, float]:
     }
 
 
-def _long_df_tracking_status_by_ticket(df: pd.DataFrame, top_n: int) -> tuple[pd.DataFrame, list[str]]:
+def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
+    """Argentina: uma fatia por segmento em `tracking_numbers_data`, classificando pelo `status` do app."""
+    if "tracking_numbers_data" not in row.index:
+        return _tracking_status_buckets_for_row(row)
+    items = _parse_tracking_numbers_app_json(row.get("tracking_numbers_data"))
+    if not items:
+        return _tracking_status_buckets_for_row(row)
+    cres = cpnd = cabt = csem = cout = 0
+    for it in items:
+        stxt = _tracking_item_inline_status_raw(it)
+        cat = _normalize_tracking_status_value(stxt) if stxt else "sem_status"
+        if cat == "resolvido":
+            cres += 1
+        elif cat == "pendente":
+            cpnd += 1
+        elif cat == "aberto":
+            cabt += 1
+        elif cat == "sem_status":
+            csem += 1
+        else:
+            cout += 1
+    n_seg = cres + cpnd + cabt + csem + cout
+    total_req = (
+        float(pd.to_numeric(row.get("total_qtd_rastreio"), errors="coerce") or 0.0)
+        if "total_qtd_rastreio" in row.index
+        else 0.0
+    )
+    extra = max(0.0, total_req - float(n_seg))
+    return {
+        "Resolvido": float(cres),
+        "Pendente": float(cpnd),
+        "Aberto": float(cabt),
+        "Sem informação de status": float(csem),
+        "Outros": float(cout),
+        "Só no total geral": extra,
+    }
+
+
+def _long_df_tracking_status_by_ticket(
+    df: pd.DataFrame, top_n: int, *, for_argentina_tab: bool = False
+) -> tuple[pd.DataFrame, list[str]]:
     """Dataframe longo (ticket_id, categoria, qtd, ord) e ordem dos tickets no eixo Y."""
     if "ticket_id" not in df.columns:
         return pd.DataFrame(), []
     work = df.copy()
-    if "total_qtd_rastreio" in work.columns:
+    if for_argentina_tab:
+        work["_tot"] = work.apply(lambda r: float(_ar_codes_per_row_for_metrics(r)), axis=1)
+    elif "total_qtd_rastreio" in work.columns:
         work["_tot"] = pd.to_numeric(work["total_qtd_rastreio"], errors="coerce").fillna(0)
     else:
         work["_tot"] = 0.0
@@ -426,7 +468,11 @@ def _long_df_tracking_status_by_ticket(df: pd.DataFrame, top_n: int) -> tuple[pd
     rows: list[dict[str, object]] = []
     for _, row in work.iterrows():
         tid = str(row["ticket_id"])
-        bucket = _tracking_status_buckets_for_row(row)
+        bucket = (
+            _tracking_status_buckets_for_row_ar(row)
+            if for_argentina_tab
+            else _tracking_status_buckets_for_row(row)
+        )
         wrote = False
         for cat in _TRACKING_STATUS_ORDER:
             v = bucket.get(cat, 0.0)
@@ -2682,9 +2728,15 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             st.caption(
                 "Cada linha é um ticket. A barra mostra **quantos códigos de rastreio** há em cada tipo de situação "
                 "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**. "
-                "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status**; "
-                "a largura usa o total de códigos quando existir, senão **1** só para o ticket aparecer no eixo (não significa “1 código” real). "
-                "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
+                + (
+                    "**Argentina:** cada segmento em **tracking_numbers_data** (ex.: listas `correo` / `andreani` / `epik`) "
+                    "entra na contagem; a cor vem do **status** do app (PT/ES). O excedente de **total_qtd_rastreio** sobre o parse "
+                    "aparece em **Só no total geral**. "
+                    if is_ar
+                    else "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status**; "
+                    "a largura usa o total de códigos quando existir, senão **1** só para o ticket aparecer no eixo (não significa “1 código” real). "
+                )
+                + "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
                 "cada código em **tracking_numbers_data** e o **agente** (**agentName**)."
             )
             _top_status = st.number_input(
@@ -2696,7 +2748,9 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 key=f"ne_{k}_status_stack_top_n",
                 help="Mostra os primeiros tickets nessa ordem; reduza se o gráfico ficar apertado.",
             )
-            _long_status, _ticket_order_status = _long_df_tracking_status_by_ticket(df, _top_status)
+            _long_status, _ticket_order_status = _long_df_tracking_status_by_ticket(
+                df, _top_status, for_argentina_tab=is_ar
+            )
             if _long_status.empty:
                 st.info("Não há barras para exibir: neste recorte não há códigos com situação para mostrar.")
             else:
