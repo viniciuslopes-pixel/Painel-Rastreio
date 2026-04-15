@@ -205,27 +205,37 @@ def _grupo_substring_match_sql(grupos: list[str]) -> str:
     return " OR ".join(parts)
 
 
-def _ticket_ids_from_env_and_temp_ar(data_model: str) -> list[str]:
-    """Só `data_model` Argentina: IDs extra no OR do WHERE (env + tupla temporária).
+def _ticket_ids_from_env_and_temp_ar(
+    data_model: str, config: dict[str, Any] | None = None
+) -> list[str]:
+    """Só `data_model` Argentina: IDs extra no OR do WHERE.
 
-    Nunca aplicar em Brasil — `NE_INCLUIR_TICKET_IDS` era lido para todos e misturava abas.
+    Fontes (sem duplicar): env `NE_INCLUIR_TICKET_IDS`, tupla `_EXTRA_TICKET_IDS_ARGENTINA_TEMP`,
+    JSON `tabs.argentina.incluir_ticket_ids` (lista de números/strings).
+
+    Nunca aplicar em Brasil — `NE_INCLUIR_TICKET_IDS` não é lido fora do modelo AR.
     """
     if data_model != DATA_MODEL_AR:
         return []
-    raw = (os.environ.get("NE_INCLUIR_TICKET_IDS") or "").strip()
     out: list[str] = []
-    for part in raw.replace(";", ",").split(","):
-        s = str(part).strip().lstrip("#")
-        if s.endswith(".0") and s[:-2].isdigit():
-            s = s[:-2]
-        if s.isdigit() and s not in out:
-            out.append(s)
-    for x in _EXTRA_TICKET_IDS_ARGENTINA_TEMP:
-        xs = str(x).strip().lstrip("#")
+
+    def _push_id(raw: object) -> None:
+        xs = str(raw).strip().lstrip("#")
         if xs.endswith(".0") and xs[:-2].isdigit():
             xs = xs[:-2]
         if xs.isdigit() and xs not in out:
             out.append(xs)
+
+    env_raw = (os.environ.get("NE_INCLUIR_TICKET_IDS") or "").strip()
+    if env_raw:
+        for part in env_raw.replace(";", ",").split(","):
+            _push_id(part)
+    for x in _EXTRA_TICKET_IDS_ARGENTINA_TEMP:
+        _push_id(x)
+    cfg_ids = (config or {}).get("incluir_ticket_ids")
+    if isinstance(cfg_ids, (list, tuple)):
+        for x in cfg_ids:
+            _push_id(x)
     return out
 
 
@@ -322,7 +332,7 @@ def build_sql(
         )
 
     extra_ticket_sql = ""
-    _tid_force = _ticket_ids_from_env_and_temp_ar(data_model)
+    _tid_force = _ticket_ids_from_env_and_temp_ar(data_model, config)
     _ids_sql = ""
     if _tid_force:
         _ids_sql = ", ".join(f"'{_sql_escape(x)}'" for x in _tid_force)
@@ -549,7 +559,7 @@ def _enforce_ar_tab_row_filter(df: pd.DataFrame, cfg: dict[str, Any]) -> pd.Data
     grupos = [str(x).strip().lower() for x in (cfg.get("filtro_grupo_contem") or []) if str(x).strip()]
     if not grupos:
         return df
-    allowed = set(_ticket_ids_from_env_and_temp_ar(DATA_MODEL_AR))
+    allowed = set(_ticket_ids_from_env_and_temp_ar(DATA_MODEL_AR, cfg))
     gcol = df["grupo"].fillna("").astype(str).str.lower()
     mask = pd.Series(False, index=df.index)
     for p in grupos:

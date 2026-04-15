@@ -427,6 +427,7 @@ def _long_df_tracking_status_by_ticket(df: pd.DataFrame, top_n: int) -> tuple[pd
     for _, row in work.iterrows():
         tid = str(row["ticket_id"])
         bucket = _tracking_status_buckets_for_row(row)
+        wrote = False
         for cat in _TRACKING_STATUS_ORDER:
             v = bucket.get(cat, 0.0)
             if v > 0:
@@ -438,6 +439,19 @@ def _long_df_tracking_status_by_ticket(df: pd.DataFrame, top_n: int) -> tuple[pd
                         "ord": _ord_map[cat],
                     }
                 )
+                wrote = True
+        if not wrote:
+            # Sem fatia > 0 o Altair não desenhava o ticket (parecia “só 4 tickets” com 55 carregados).
+            total_req = float(pd.to_numeric(row.get("total_qtd_rastreio"), errors="coerce") or 0)
+            q = max(total_req, 1.0)
+            rows.append(
+                {
+                    "ticket_id": tid,
+                    "categoria": "Sem informação de status",
+                    "qtd": q,
+                    "ord": _ord_map["Sem informação de status"],
+                }
+            )
     return pd.DataFrame(rows), ticket_order
 
 
@@ -2377,10 +2391,16 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 return str(int(r["volume_solicitacoes"].sum()))
             return "0"
 
+        _vol_ar_total = (
+            int(_vol_df_ar["volume_solicitacoes"].sum())
+            if len(_vol_df_ar) and "volume_solicitacoes" in _vol_df_ar.columns
+            else 0
+        )
         c2.metric(
             "Total de solicitações",
-            int(_total_track_series.sum()) if len(df) else "—",
-            help="Soma de todos os códigos de rastreio nesta amostra.",
+            _vol_ar_total if len(df) else "—",
+            help="Soma dos códigos no JSON `tracking_numbers_data` (igual ao gráfico por transportadora). "
+            "Difere da coluna SQL `total_qtd_rastreio` quando o parse no warehouse diverge do app.",
         )
         c3.metric(
             "Máx. códigos em 1 ticket",
@@ -2430,6 +2450,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             st.caption(
                 "Cada linha é um ticket. A barra mostra **quantos códigos de rastreio** há em cada tipo de situação "
                 "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**. "
+                "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status** "
+                "(largura mínima 1 quando não há total). "
                 "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
                 "cada código em **tracking_numbers_data** e o **agente** (**agentName**)."
             )
