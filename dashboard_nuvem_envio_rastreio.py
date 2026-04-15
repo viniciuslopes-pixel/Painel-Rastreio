@@ -221,6 +221,7 @@ def _run_pending_ne_fetch(raw_cfg: dict) -> None:
 _TRACKING_STATUS_ORDER = (
     "Resolvido",
     "Pendente",
+    "Solo consulta",
     "Aberto",
     "Sem informação de status",
     "Outros",
@@ -229,6 +230,7 @@ _TRACKING_STATUS_ORDER = (
 _TRACKING_STATUS_COLORS = {
     "Resolvido": "#16a34a",
     "Pendente": "#ca8a04",
+    "Solo consulta": "#0891b2",
     "Aberto": "#2563eb",
     "Sem informação de status": "#94a3b8",
     "Outros": "#7c3aed",
@@ -237,14 +239,28 @@ _TRACKING_STATUS_COLORS = {
 
 
 def _normalize_tracking_status_value(val: object) -> str:
-    """Classifica o valor de status de um código no JSON `status_rastreamento`."""
+    """Classifica status (BR `status_rastreamento` ou AR `status` no JSON do app).
+
+    **Argentina — textos oficiais do app:** Solo consulta; Pendiente con merchant / transportista / BO;
+    Finalizado. Demais caem nas regras genéricas (PT/EN/ES).
+    """
     if val is None:
         return "sem_status"
     s = str(val).strip().lower()
     if not s or s in ("null", "none", "{}", "[]"):
         return "sem_status"
+    s_norm = " ".join(s.split())
+
+    if s_norm == "solo consulta":
+        return "solo_consulta"
+    if s_norm == "finalizado" or s_norm.startswith("finalizado "):
+        return "resolvido"
+    for phrase in ("pendiente con transportista", "pendiente con merchant", "pendiente con bo"):
+        if s_norm == phrase or s_norm.startswith(phrase + " ") or s_norm.startswith(phrase + "—"):
+            return "pendente"
+
     if any(
-        k in s
+        k in s_norm
         for k in (
             "resolv",
             "solved",
@@ -254,12 +270,13 @@ def _normalize_tracking_status_value(val: object) -> str:
             "entregue",
             "delivered",
             "complet",
+            "finaliz",
         )
     ):
         return "resolvido"
-    if "pend" in s or "pendiente" in s:
+    if "pend" in s_norm or "pendiente" in s_norm:
         return "pendente"
-    if any(k in s for k in ("open", "opening", "abert", "abiert", "abierto")):
+    if any(k in s_norm for k in ("open", "opening", "abert", "abiert", "abierto")):
         return "aberto"
     return "outros"
 
@@ -267,6 +284,7 @@ def _normalize_tracking_status_value(val: object) -> str:
 _DETAIL_STATUS_INTERNAL_LABEL: dict[str, str] = {
     "resolvido": "Resolvido",
     "pendente": "Pendente",
+    "solo_consulta": "Solo consulta",
     "aberto": "Aberto",
     "sem_status": "Sem informação de status",
     "outros": "Outros",
@@ -376,7 +394,14 @@ def _find_tracking_item_for_code(items: list[dict], scode: str) -> dict | None:
 
 def _parse_status_rastreamento_json(raw: object) -> dict[str, int]:
     """Conta códigos no JSON {codigo: status} por categoria interna."""
-    out = {"resolvido": 0, "pendente": 0, "aberto": 0, "sem_status": 0, "outros": 0}
+    out = {
+        "resolvido": 0,
+        "pendente": 0,
+        "solo_consulta": 0,
+        "aberto": 0,
+        "sem_status": 0,
+        "outros": 0,
+    }
     base = _coerce_status_rastreamento_dict(raw)
     if not base:
         return out
@@ -386,6 +411,8 @@ def _parse_status_rastreamento_json(raw: object) -> dict[str, int]:
             out["resolvido"] += 1
         elif cat == "pendente":
             out["pendente"] += 1
+        elif cat == "solo_consulta":
+            out["solo_consulta"] += 1
         elif cat == "aberto":
             out["aberto"] += 1
         elif cat == "sem_status":
@@ -404,6 +431,7 @@ def _tracking_status_buckets_for_row(row: pd.Series) -> dict[str, float]:
     return {
         "Resolvido": float(counts["resolvido"]),
         "Pendente": float(counts["pendente"]),
+        "Solo consulta": float(counts["solo_consulta"]),
         "Aberto": float(counts["aberto"]),
         "Sem informação de status": float(counts["sem_status"]),
         "Outros": float(counts["outros"]),
@@ -418,7 +446,7 @@ def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
     items = _parse_tracking_numbers_app_json(row.get("tracking_numbers_data"))
     if not items:
         return _tracking_status_buckets_for_row(row)
-    cres = cpnd = cabt = csem = cout = 0
+    cres = cpnd = csolo = cabt = csem = cout = 0
     for it in items:
         stxt = _tracking_item_inline_status_raw(it)
         cat = _normalize_tracking_status_value(stxt) if stxt else "sem_status"
@@ -426,13 +454,15 @@ def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
             cres += 1
         elif cat == "pendente":
             cpnd += 1
+        elif cat == "solo_consulta":
+            csolo += 1
         elif cat == "aberto":
             cabt += 1
         elif cat == "sem_status":
             csem += 1
         else:
             cout += 1
-    n_seg = cres + cpnd + cabt + csem + cout
+    n_seg = cres + cpnd + csolo + cabt + csem + cout
     total_req = (
         float(pd.to_numeric(row.get("total_qtd_rastreio"), errors="coerce") or 0.0)
         if "total_qtd_rastreio" in row.index
@@ -442,6 +472,7 @@ def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
     return {
         "Resolvido": float(cres),
         "Pendente": float(cpnd),
+        "Solo consulta": float(csolo),
         "Aberto": float(cabt),
         "Sem informação de status": float(csem),
         "Outros": float(cout),
