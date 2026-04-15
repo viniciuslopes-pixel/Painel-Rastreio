@@ -482,10 +482,34 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
                 "packages",
                 "cards",
                 "segments",
+                "shipments",
+                "labels",
+                "records",
+                "rows",
+                "results",
+                "result",
+                "response",
+                "payload",
+                "content",
+                "lista",
+                "list",
             ):
                 inner = obj.get(key)
                 if isinstance(inner, list):
                     return inner
+            if len(obj) == 1:
+                only_v = next(iter(obj.values()))
+                if isinstance(only_v, str):
+                    tv = only_v.strip()
+                    if tv.startswith("[") or tv.startswith("{"):
+                        try:
+                            inner = json.loads(tv)
+                        except json.JSONDecodeError:
+                            inner = None
+                        if isinstance(inner, list):
+                            return inner
+                        if isinstance(inner, dict):
+                            return _coerce_list(inner)
             if any(
                 k in obj
                 for k in (
@@ -891,7 +915,12 @@ def _build_encomendas_ttr_detail_df(df: pd.DataFrame) -> pd.DataFrame:
     for _, r in df.iterrows():
         tid = _norm_ticket_id(r["ticket_id"])
         st_raw = r.get("status_rastreamento") if "status_rastreamento" in r.index else None
-        sub = flatten_tracking_numbers_data_detail(r.get("tracking_numbers_data"), tid, st_raw)
+        sub = flatten_tracking_numbers_data_detail(
+            r.get("tracking_numbers_data"),
+            tid,
+            st_raw,
+            for_argentina_tab=True,
+        )
         if not sub.empty:
             chunks.append(sub)
     if not chunks:
@@ -989,6 +1018,8 @@ def flatten_tracking_numbers_data_detail(
     tracking_raw: object,
     ticket_id: str,
     status_rastreamento_raw: object | None = None,
+    *,
+    for_argentina_tab: bool = False,
 ) -> pd.DataFrame:
     """Uma linha por código: **chaves de `status_rastreamento`** (código → status) + enriquecimento do JSON de rastreio.
 
@@ -996,10 +1027,17 @@ def flatten_tracking_numbers_data_detail(
     `tracking_numbers_data` só cruza para guru/TTR/transportadora quando o código bate.
 
     Sem `status_rastreamento`, cai no modo antigo (só itens de `tracking_numbers_data`).
+
+    **Argentina:** `for_argentina_tab=True` ignora o ramo por `status_rastreamento` (fluxo BR); só
+    `tracking_numbers_data` monta as linhas — evita tabela só com “-” quando o mapa de status não
+    casa com o JSON do app AR.
     """
     tid = _norm_ticket_id(ticket_id)
     ex, nx = _parse_status_rastreamento_lookup(status_rastreamento_raw)
     status_pairs = _parse_status_rastreamento_items(status_rastreamento_raw)
+    if for_argentina_tab:
+        status_pairs = []
+        ex, nx = {}, {}
     items = _parse_tracking_numbers_app_json(tracking_raw)
     rows: list[dict[str, object]] = []
 
@@ -1010,9 +1048,10 @@ def flatten_tracking_numbers_data_detail(
         raw_status_zendesk: str | None,
     ) -> None:
         itd = it if isinstance(it, dict) else {}
-        guru = _tracking_agent_name(itd) if itd else "—"
-        ca = itd.get("createdAt") or itd.get("created_at") if itd else None
-        co = _tracking_segment_end_timestamp(itd) if itd else None
+        has_segment = bool(itd)
+        guru = _tracking_agent_name(itd) if has_segment else "—"
+        ca = (itd.get("createdAt") or itd.get("created_at")) if has_segment else None
+        co = _tracking_segment_end_timestamp(itd) if has_segment else None
         ttr = _tracking_app_ttr_hours_resolved(ca, co)
         cos = ""
         if co is not None:
@@ -1028,7 +1067,7 @@ def flatten_tracking_numbers_data_detail(
         else:
             situacao = "Tempo não calculado"
         raw_z = (raw_status_zendesk or "").strip()
-        raw_inline = _tracking_item_inline_status_raw(itd) if itd else ""
+        raw_inline = _tracking_item_inline_status_raw(itd) if has_segment else ""
         raw_for = raw_z or raw_inline
         if raw_for:
             cat = _normalize_tracking_status_value(raw_for)
@@ -1039,10 +1078,10 @@ def flatten_tracking_numbers_data_detail(
             op_label = "Aberto"
         else:
             op_label = "Sem informação de status"
-        car_raw = _tracking_display_carrier(itd) if itd else ""
+        car_raw = _tracking_display_carrier(itd) if has_segment else ""
         car_disp = car_raw if car_raw else "—"
         car_ar = _ar_canonical_carrier(car_raw)
-        dtxt = _tracking_app_duracion_text(itd) if itd else ""
+        dtxt = _tracking_app_duracion_text(itd) if has_segment else ""
         rows.append(
             {
                 "ticket_id": tid,
@@ -1472,7 +1511,12 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
 
     _tr_raw = row.get("tracking_numbers_data") if "tracking_numbers_data" in row.index else None
     _st_raw = row.get("status_rastreamento") if "status_rastreamento" in row.index else None
-    detail_df = flatten_tracking_numbers_data_detail(_tr_raw, tid, _st_raw)
+    detail_df = flatten_tracking_numbers_data_detail(
+        _tr_raw,
+        tid,
+        _st_raw,
+        for_argentina_tab=(tab == "argentina"),
+    )
     _n_fallback = 0
     if "total_qtd_rastreio" in row.index:
         try:
