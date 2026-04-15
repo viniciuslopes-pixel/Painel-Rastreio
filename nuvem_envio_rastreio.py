@@ -323,6 +323,7 @@ def build_sql(
 
     extra_ticket_sql = ""
     _tid_force = _ticket_ids_from_env_and_temp_ar(data_model)
+    _ids_sql = ""
     if _tid_force:
         _ids_sql = ", ".join(f"'{_sql_escape(x)}'" for x in _tid_force)
         extra_ticket_sql = f" OR CAST(t.id AS STRING) IN ({_ids_sql})"
@@ -397,6 +398,25 @@ def build_sql(
             if parts:
                 tracking_filter_sql = "  AND (" + " OR ".join(parts) + ")\n"
 
+    # Com LIMIT, tickets forçados (total_qtd baixo) ficavam fora do TOP N — priorizar no ORDER BY.
+    if _tid_force and _ids_sql:
+        order_by_sql = (
+            "ORDER BY CASE WHEN CAST(t.id AS STRING) IN ("
+            + _ids_sql
+            + ") THEN 0 ELSE 1 END ASC, total_qtd_rastreio DESC, t.updated_at DESC"
+        )
+    else:
+        order_by_sql = "ORDER BY total_qtd_rastreio DESC, t.updated_at DESC"
+
+    _d_lo = f"CAST(t.updated_at AS DATE) >= '{_sql_escape(start_date)}'"
+    _d_hi = f"CAST(t.updated_at AS DATE) <= '{_sql_escape(end_date)}'"
+    _date_core = f"({_d_lo} AND {_d_hi})"
+    # Argentina + IDs forçados: inclui o ticket mesmo fora do intervalo de datas (senão some do cf_raw).
+    if _tid_force and _ids_sql and data_model == DATA_MODEL_AR:
+        ticket_date_predicate = f"({_date_core} OR CAST(t.id AS STRING) IN ({_ids_sql}))"
+    else:
+        ticket_date_predicate = _date_core
+
     return f"""
 WITH cf_raw AS (
     SELECT
@@ -405,8 +425,7 @@ WITH cf_raw AS (
         get_json_object(cf_item, '$.value') AS cf_val
     FROM {schema}.tickets t
     LATERAL VIEW EXPLODE(FROM_JSON(t.custom_fields, 'ARRAY<STRING>')) e AS cf_item
-    WHERE CAST(t.updated_at AS DATE) >= '{_sql_escape(start_date)}'
-      AND CAST(t.updated_at AS DATE) <= '{_sql_escape(end_date)}'
+    WHERE {ticket_date_predicate}
       AND t.status IN ({status_list})
 ),
 cf_pivot AS (
@@ -430,8 +449,7 @@ SELECT
 FROM {schema}.tickets t
 LEFT JOIN {schema}.groups g ON t.group_id = g.id
 LEFT JOIN cf_pivot p ON p.ticket_id = t.id
-WHERE CAST(t.updated_at AS DATE) >= '{_sql_escape(start_date)}'
-  AND CAST(t.updated_at AS DATE) <= '{_sql_escape(end_date)}'
+WHERE {ticket_date_predicate}
   AND t.status IN ({status_list})
   AND (
     {(
@@ -440,7 +458,7 @@ WHERE CAST(t.updated_at AS DATE) >= '{_sql_escape(start_date)}'
         else f"({grupo_or})\n    OR ({bu_or}){extra_ticket_sql}"
     )}
   )
-{tracking_filter_sql}ORDER BY total_qtd_rastreio DESC, t.updated_at DESC
+{tracking_filter_sql}{order_by_sql}
 {limit_clause}
 """
 
