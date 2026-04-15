@@ -195,7 +195,12 @@ def _sql_escape(s: str) -> str:
 
 
 def _ticket_ids_from_env_and_temp_ar(data_model: str) -> list[str]:
-    """IDs numéricos para OR no WHERE (Argentina: env + tupla temporária)."""
+    """Só `data_model` Argentina: IDs extra no OR do WHERE (env + tupla temporária).
+
+    Nunca aplicar em Brasil — `NE_INCLUIR_TICKET_IDS` era lido para todos e misturava abas.
+    """
+    if data_model != DATA_MODEL_AR:
+        return []
     raw = (os.environ.get("NE_INCLUIR_TICKET_IDS") or "").strip()
     out: list[str] = []
     for part in raw.replace(";", ",").split(","):
@@ -204,13 +209,12 @@ def _ticket_ids_from_env_and_temp_ar(data_model: str) -> list[str]:
             s = s[:-2]
         if s.isdigit() and s not in out:
             out.append(s)
-    if data_model == DATA_MODEL_AR:
-        for x in _EXTRA_TICKET_IDS_ARGENTINA_TEMP:
-            xs = str(x).strip().lstrip("#")
-            if xs.endswith(".0") and xs[:-2].isdigit():
-                xs = xs[:-2]
-            if xs.isdigit() and xs not in out:
-                out.append(xs)
+    for x in _EXTRA_TICKET_IDS_ARGENTINA_TEMP:
+        xs = str(x).strip().lstrip("#")
+        if xs.endswith(".0") and xs[:-2].isdigit():
+            xs = xs[:-2]
+        if xs.isdigit() and xs not in out:
+            out.append(xs)
     return out
 
 
