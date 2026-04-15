@@ -42,6 +42,121 @@ import streamlit.components.v1 as components
 _NE_ACCENT = "#0050c3"
 _NE_ACCENT_HOVER = "#0040a0"
 _NE_PAGE_TITLE = "Painel de Rastreamento"
+# Login — identidade Nuvemshop (UI dedicada)
+_NE_NS_BLUE = "#0045FF"
+_NE_NS_BLUE_HOVER = "#0038d6"
+_NE_LOGIN_PAGE_BG = "#eef1f6"
+
+
+def _ne_login_screen_css() -> str:
+    """CSS injetado só na tela de login (antes de ``st.stop()``)."""
+    bg = html.escape(_NE_LOGIN_PAGE_BG)
+    blue = html.escape(_NE_NS_BLUE)
+    blue_h = html.escape(_NE_NS_BLUE_HOVER)
+    return f"""
+<style>
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap");
+html, body, .stApp, [data-testid="stAppViewContainer"] {{
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif !important;
+  background: {bg} !important;
+}}
+[data-testid="stAppViewContainer"] > .main {{
+  background: transparent !important;
+}}
+[data-testid="stSidebar"] {{ display: none !important; }}
+[data-testid="stHeader"] {{ display: none !important; }}
+[data-testid="stToolbar"] {{ display: none !important; }}
+[data-testid="stDecoration"] {{ display: none !important; }}
+[data-testid="stFooter"] {{ display: none !important; }}
+footer {{ visibility: hidden !important; height: 0 !important; }}
+.main .block-container {{
+  padding-top: clamp(2.5rem, 12vh, 6rem) !important;
+  padding-bottom: 3rem !important;
+  max-width: 100% !important;
+}}
+form[data-testid="stForm"] {{
+  background: #ffffff !important;
+  border-radius: 16px !important;
+  border: 1px solid rgba(148, 163, 184, 0.18) !important;
+  box-shadow: 0 12px 40px -8px rgba(15, 23, 42, 0.1), 0 4px 12px -4px rgba(15, 23, 42, 0.06) !important;
+  max-width: 420px !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+  padding: 2.35rem 2.1rem 1.85rem !important;
+}}
+.ne-login-title {{
+  margin: 0 0 0.35rem 0 !important;
+  font-size: 1.65rem !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.02em !important;
+  color: #0f172a !important;
+  line-height: 1.25 !important;
+  text-align: center !important;
+}}
+.ne-login-sub {{
+  margin: 0 0 1.75rem 0 !important;
+  font-size: 0.95rem !important;
+  font-weight: 500 !important;
+  color: #64748b !important;
+  text-align: center !important;
+  letter-spacing: 0.01em !important;
+}}
+.ne-login-badge {{
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: {blue};
+  background: rgba(0, 69, 255, 0.08);
+  padding: 0.25rem 0.55rem;
+  border-radius: 6px;
+  margin-bottom: 0.85rem;
+}}
+form[data-testid="stForm"] .stTextInput label {{
+  font-weight: 500 !important;
+  color: #334155 !important;
+  font-size: 0.875rem !important;
+}}
+form[data-testid="stForm"] .stTextInput input {{
+  border-radius: 10px !important;
+  border-color: #e2e8f0 !important;
+}}
+form[data-testid="stForm"] .stTextInput input:focus {{
+  border-color: {blue} !important;
+  box-shadow: 0 0 0 1px {blue} !important;
+}}
+html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[data-testid="baseButton-primary"],
+html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"] {{
+  width: 100% !important;
+  background-color: {blue} !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  border: none !important;
+  border-color: transparent !important;
+  border-radius: 10px !important;
+  font-weight: 600 !important;
+  font-size: 0.95rem !important;
+  padding: 0.65rem 1rem !important;
+  margin-top: 0.5rem !important;
+  box-shadow: none !important;
+}}
+html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[data-testid="baseButton-primary"]:hover,
+html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"]:hover {{
+  background-color: {blue_h} !important;
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  border: none !important;
+  border-color: transparent !important;
+}}
+html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[data-testid="baseButton-primary"]:focus,
+html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"]:focus {{
+  outline: 2px solid rgba(0, 69, 255, 0.35) !important;
+  outline-offset: 2px !important;
+  border-color: transparent !important;
+}}
+</style>
+"""
 
 
 def _ne_dashboard_login_expected() -> tuple[str | None, str | None]:
@@ -83,23 +198,24 @@ def _ne_ensure_dashboard_auth() -> None:
     if st.session_state.get("ne_auth_ok"):
         return
 
-    st.markdown(
-        f"""
-        <div style="max-width:420px;margin:3rem auto 1.5rem auto;text-align:center;">
-            <h1 style="color:{html.escape(_NE_ACCENT)};font-size:1.65rem;font-weight:800;margin:0;">
-                {_NE_PAGE_TITLE}
-            </h1>
-            <p style="color:#475569;margin-top:0.75rem;font-size:1rem;">Acesso restrito</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown(_ne_login_screen_css(), unsafe_allow_html=True)
+
     with st.form("ne_login_form", clear_on_submit=False):
+        st.markdown(
+            f"""
+            <div style="text-align:center;">
+                <span class="ne-login-badge">Nuvemshop</span>
+                <h1 class="ne-login-title">{html.escape(_NE_PAGE_TITLE)}</h1>
+                <p class="ne-login-sub">Acesso restrito — identifique-se para continuar</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         typed_user = ""
         if expected_user is not None:
             typed_user = st.text_input("Usuário", key="ne_login_user")
         typed_pw = st.text_input("Senha", type="password", key="ne_login_pw")
-        submitted = st.form_submit_button("Entrar", type="primary")
+        submitted = st.form_submit_button("Entrar", type="primary", use_container_width=True)
 
     if submitted:
         ok_u = True
