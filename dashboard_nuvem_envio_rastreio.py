@@ -62,6 +62,10 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {{
 }}
 [data-testid="stAppViewContainer"] > .main {{
   background: transparent !important;
+  min-height: 100vh !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
 }}
 [data-testid="stSidebar"] {{ display: none !important; }}
 [data-testid="stHeader"] {{ display: none !important; }}
@@ -70,90 +74,131 @@ html, body, .stApp, [data-testid="stAppViewContainer"] {{
 [data-testid="stFooter"] {{ display: none !important; }}
 footer {{ visibility: hidden !important; height: 0 !important; }}
 .main .block-container {{
-  padding-top: clamp(2.5rem, 12vh, 6rem) !important;
-  padding-bottom: 3rem !important;
+  padding: 1.5rem 1rem 2rem 1rem !important;
   max-width: 100% !important;
+  width: 100% !important;
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-sizing: border-box !important;
 }}
 form[data-testid="stForm"] {{
   background: #ffffff !important;
-  border-radius: 16px !important;
-  border: 1px solid rgba(148, 163, 184, 0.18) !important;
-  box-shadow: 0 12px 40px -8px rgba(15, 23, 42, 0.1), 0 4px 12px -4px rgba(15, 23, 42, 0.06) !important;
-  max-width: 420px !important;
-  margin-left: auto !important;
-  margin-right: auto !important;
-  padding: 2.35rem 2.1rem 1.85rem !important;
+  border-radius: 14px !important;
+  border: 1px solid rgba(148, 163, 184, 0.2) !important;
+  box-shadow: 0 16px 48px -12px rgba(15, 23, 42, 0.12), 0 4px 16px -4px rgba(15, 23, 42, 0.06) !important;
+  max-width: 400px !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  margin: 0 auto !important;
+  padding: 30px !important;
 }}
 .ne-login-title {{
-  margin: 0 0 0.35rem 0 !important;
-  font-size: 1.65rem !important;
+  margin: 0 0 0.5rem 0 !important;
+  font-size: 1.6rem !important;
   font-weight: 700 !important;
   letter-spacing: -0.02em !important;
   color: #0f172a !important;
-  line-height: 1.25 !important;
+  line-height: 1.3 !important;
   text-align: center !important;
 }}
 .ne-login-sub {{
-  margin: 0 0 1.75rem 0 !important;
-  font-size: 0.95rem !important;
+  margin: 0 0 1.65rem 0 !important;
+  font-size: 0.9375rem !important;
   font-weight: 500 !important;
   color: #64748b !important;
   text-align: center !important;
-  letter-spacing: 0.01em !important;
+  line-height: 1.45 !important;
 }}
-.ne-login-badge {{
-  display: inline-block;
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: {blue};
-  background: rgba(0, 69, 255, 0.08);
-  padding: 0.25rem 0.55rem;
-  border-radius: 6px;
-  margin-bottom: 0.85rem;
+/* Campos: largura total no card + Base Web */
+form[data-testid="stForm"] [data-testid="stTextInput"],
+form[data-testid="stForm"] .stTextInput {{
+  width: 100% !important;
+  max-width: 100% !important;
 }}
-form[data-testid="stForm"] .stTextInput label {{
+form[data-testid="stForm"] .stTextInput > div,
+form[data-testid="stForm"] [data-testid="stTextInput"] > div {{
+  width: 100% !important;
+}}
+form[data-testid="stForm"] .stTextInput label,
+form[data-testid="stForm"] [data-testid="stTextInput"] label {{
   font-weight: 500 !important;
   color: #334155 !important;
   font-size: 0.875rem !important;
 }}
-form[data-testid="stForm"] .stTextInput input {{
-  border-radius: 10px !important;
+form[data-testid="stForm"] .stTextInput [data-baseweb="input"],
+form[data-testid="stForm"] [data-testid="stTextInput"] [data-baseweb="input"] {{
+  border-radius: 12px !important;
   border-color: #e2e8f0 !important;
+  background-color: #fafbfc !important;
 }}
-form[data-testid="stForm"] .stTextInput input:focus {{
+form[data-testid="stForm"] .stTextInput [data-baseweb="input"]:focus-within,
+form[data-testid="stForm"] [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {{
   border-color: {blue} !important;
   box-shadow: 0 0 0 1px {blue} !important;
 }}
+form[data-testid="stForm"] div[data-baseweb="input"] > div {{
+  border-radius: 12px !important;
+  border-color: #e2e8f0 !important;
+}}
+form[data-testid="stForm"] div[data-baseweb="input"]:focus-within > div {{
+  border-color: {blue} !important;
+  box-shadow: 0 0 0 1px {blue} !important;
+}}
+/* Botão Entrar — sobrescreve tema global (incl. vermelho primário) */
+form[data-testid="stForm"] .stButton,
+form[data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+  width: 100% !important;
+}}
+form[data-testid="stForm"] [data-baseweb="button"] {{
+  border: none !important;
+  box-shadow: none !important;
+  outline: none !important;
+  background: transparent !important;
+}}
+form[data-testid="stForm"] .stButton > button,
+form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button,
 html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[data-testid="baseButton-primary"],
 html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"] {{
   width: 100% !important;
   background-color: {blue} !important;
+  background-image: none !important;
   color: #ffffff !important;
   -webkit-text-fill-color: #ffffff !important;
   border: none !important;
+  border-width: 0 !important;
   border-color: transparent !important;
   border-radius: 10px !important;
-  font-weight: 600 !important;
+  font-weight: 700 !important;
   font-size: 0.95rem !important;
-  padding: 0.65rem 1rem !important;
-  margin-top: 0.5rem !important;
+  padding: 0.7rem 1rem !important;
+  margin-top: 0.35rem !important;
   box-shadow: none !important;
 }}
-html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[data-testid="baseButton-primary"]:hover,
+form[data-testid="stForm"] .stButton > button:hover,
+form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:hover,
 html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"]:hover {{
   background-color: {blue_h} !important;
+  background-image: none !important;
   color: #ffffff !important;
   -webkit-text-fill-color: #ffffff !important;
   border: none !important;
   border-color: transparent !important;
 }}
-html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[data-testid="baseButton-primary"]:focus,
+form[data-testid="stForm"] .stButton > button:focus,
+form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:focus,
 html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"]:focus {{
   outline: 2px solid rgba(0, 69, 255, 0.35) !important;
   outline-offset: 2px !important;
+  border: none !important;
   border-color: transparent !important;
+  box-shadow: none !important;
+}}
+form[data-testid="stForm"] .stButton > button:active,
+form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:active {{
+  background-color: {blue_h} !important;
+  color: #ffffff !important;
 }}
 </style>
 """
@@ -204,9 +249,8 @@ def _ne_ensure_dashboard_auth() -> None:
         st.markdown(
             f"""
             <div style="text-align:center;">
-                <span class="ne-login-badge">Nuvemshop</span>
                 <h1 class="ne-login-title">{html.escape(_NE_PAGE_TITLE)}</h1>
-                <p class="ne-login-sub">Acesso restrito — identifique-se para continuar</p>
+                <p class="ne-login-sub">Acesso restrito</p>
             </div>
             """,
             unsafe_allow_html=True,
