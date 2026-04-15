@@ -1,5 +1,5 @@
 {
-  "_instrucoes": "Copie para nuvem_envio_rastreio_config.json. filtro_grupo_contem: OR no nome do grupo Zendesk (ex.: Argentina inclui Knowledge Management no exemplo). Código também injeta _EXTRA_GRUPOS_ARGENTINA_TEMP em nuvem_envio_rastreio.py (temporário).",
+  "_instrucoes": "Copie para nuvem_envio_rastreio_config.json. filtro_grupo_contem: OR em substrings do nome do grupo Zendesk. Argentina: só o time (ex.: [AR] Envio Nube); evite substring genérica tipo só \"envio nube\" (pode casar grupo BR). filtro_bu_contem na Argentina é ignorado na SQL — BU no Zendesk costuma ser igual entre países e puxava tickets BR. Ticket extra: NE_INCLUIR_TICKET_IDS ou _EXTRA_TICKET_IDS_ARGENTINA_TEMP no código.",
   "catalog_schema": "seu_catalogo.seu_schema_zendesk",
   "dashboard_base_url": "",
   "zendesk_ticket_url_template": "https://SUA_INSTANCIA.zendesk.com/agent/tickets/{ticket_id}",
@@ -35,14 +35,9 @@
         "status_rastreamento": "SUBSTITUA_ID_STATUS"
       },
       "filtro_grupo_contem": [
-        "grupo argentina 1",
-        "grupo argentina 2",
-        "Knowledge Management"
+        "[AR] Envio Nube"
       ],
-      "filtro_bu_contem": [
-        "valor_bu_1",
-        "valor_bu_2"
-      ]
+      "filtro_bu_contem": []
     }
   }
 }

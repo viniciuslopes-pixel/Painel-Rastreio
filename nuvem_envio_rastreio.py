@@ -125,7 +125,7 @@ _ROOT_KEYS_INHERITED_BY_TAB = (
 
 # Argentina: OR extra em `filtro_grupo_contem` (além do JSON). Esvazie a tupla para desligar no código.
 # Deploy: use também NE_FILTRO_GRUPO_EXTRA_ARGENTINA (lista separada por vírgula ou ;).
-_EXTRA_GRUPOS_ARGENTINA_TEMP: tuple[str, ...] = ("Knowledge Management",)
+_EXTRA_GRUPOS_ARGENTINA_TEMP: tuple[str, ...] = ()
 
 # Argentina: estes ticket_id entram na query mesmo fora de grupo/BU (OR no WHERE). Esvazie após testes.
 _EXTRA_TICKET_IDS_ARGENTINA_TEMP: tuple[str, ...] = ("7268849",)
@@ -192,6 +192,17 @@ def _merge_extra_grupos_argentina(merged: dict[str, Any]) -> None:
 
 def _sql_escape(s: str) -> str:
     return s.replace("'", "''")
+
+
+def _grupo_substring_match_sql(grupos: list[str]) -> str:
+    """Substring no nome do grupo (case-insensitive), sem LIKE — evita metacaracteres em Databricks/Hive."""
+    parts: list[str] = []
+    for g in grupos:
+        needle = _sql_escape(str(g).lower())
+        parts.append(
+            f"locate('{needle}', lower(cast(coalesce(g.name, '') as string))) > 0"
+        )
+    return " OR ".join(parts)
 
 
 def _ticket_ids_from_env_and_temp_ar(data_model: str) -> list[str]:
@@ -289,19 +300,26 @@ def build_sql(
 
     id_in_list = ", ".join(f"'{_sql_escape(x)}'" for x in cf_ids)
 
-    grupos = config.get("filtro_grupo_contem") or []
-    bus = config.get("filtro_bu_contem") or []
-    if not grupos or not bus:
+    grupos = [str(x).strip() for x in (config.get("filtro_grupo_contem") or []) if str(x).strip()]
+    bus = [str(x).strip() for x in (config.get("filtro_bu_contem") or []) if str(x).strip()]
+    if not grupos:
         raise ValueError(
-            "Preencha filtro_grupo_contem e filtro_bu_contem no JSON de config (listas não vazias)."
+            "Preencha filtro_grupo_contem no JSON de config (lista não vazia de substrings do grupo)."
+        )
+    if data_model != DATA_MODEL_AR and not bus:
+        raise ValueError(
+            "No modelo Brasil, preencha filtro_bu_contem (lista não vazia). "
+            "Na Argentina o filtro por BU não entra na SQL (valores iguais aos do Brasil puxavam tickets BR)."
         )
 
-    grupo_or = " OR ".join(
-        f"LOWER(COALESCE(g.name, '')) LIKE '%{_sql_escape(g.lower())}%'" for g in grupos
-    )
-    bu_or = " OR ".join(
-        f"LOWER(COALESCE(p.bu, '')) LIKE '%{_sql_escape(b.lower())}%'" for b in bus
-    )
+    grupo_or = _grupo_substring_match_sql(grupos)
+    # Brasil: grupo OU BU. Argentina: só grupo + tickets forçados — OR por BU misturava tickets BR
+    # (mesmo custom field de BU com envio_nube / envío_nube em ambos os países).
+    bu_or = ""
+    if data_model != DATA_MODEL_AR:
+        bu_or = " OR ".join(
+            f"LOWER(COALESCE(p.bu, '')) LIKE '%{_sql_escape(b.lower())}%'" for b in bus
+        )
 
     extra_ticket_sql = ""
     _tid_force = _ticket_ids_from_env_and_temp_ar(data_model)
@@ -320,7 +338,7 @@ def build_sql(
     logical_set = {c[0] for c in extra_cols}
 
     if data_model == DATA_MODEL_AR and "tracking_numbers_data" in logical_set:
-        # Quantidade para ordenação: maior entre contagem no JSON de tracking e chaves em status_rastreamento.
+        # Quantidade para ordenação: só contagem no JSON de tracking.
         _n_tr = """CASE
         WHEN p.tracking_numbers_data IS NULL
           OR TRIM(CAST(p.tracking_numbers_data AS STRING)) IN ('', '{}', 'null', '[]')
@@ -330,26 +348,7 @@ def build_sql(
           1
         )
       END"""
-        if "status_rastreamento" in logical_set:
-            _n_st = """CASE
-        WHEN p.status_rastreamento IS NULL
-          OR TRIM(CAST(p.status_rastreamento AS STRING)) IN ('', '{}', 'null', '[]')
-          OR LOWER(TRIM(CAST(p.status_rastreamento AS STRING))) IN ('null', 'none')
-        THEN 0
-        ELSE COALESCE(
-          TRY_CAST(SIZE(FROM_JSON(TRIM(CAST(p.status_rastreamento AS STRING)), 'MAP<STRING,STRING>')) AS INT),
-          1
-        )
-      END"""
-            total_qtd_sql = (
-                "(GREATEST(CAST(("
-                + _n_tr
-                + ") AS BIGINT), COALESCE(CAST(("
-                + _n_st
-                + ") AS BIGINT), CAST(0 AS BIGINT)))) AS total_qtd_rastreio"
-            )
-        else:
-            total_qtd_sql = f"(({_n_tr})) AS total_qtd_rastreio"
+        total_qtd_sql = f"(({_n_tr})) AS total_qtd_rastreio"
     else:
         sum_parts = [
             f"COALESCE(TRY_CAST(p.{f} AS INT), 0)"
@@ -369,14 +368,13 @@ def build_sql(
       p.tracking_numbers_data IS NOT NULL
       AND TRIM(CAST(p.tracking_numbers_data AS STRING)) NOT IN ('', '{}', 'null', '[]')
     )"""
-            if "status_rastreamento" in logical_set:
-                _st_ok = """(
-      p.status_rastreamento IS NOT NULL
-      AND TRIM(CAST(p.status_rastreamento AS STRING)) != ''
-      AND TRIM(CAST(p.status_rastreamento AS STRING)) != '{}'
-      AND LOWER(TRIM(CAST(p.status_rastreamento AS STRING))) NOT IN ('null', 'none')
-    )"""
-                tracking_filter_sql = f"  AND ({_trk_ok}\n    OR {_st_ok})\n"
+            if _tid_force:
+                _ids_trk = ", ".join(
+                    f"'{_sql_escape(x)}'" for x in _tid_force
+                )
+                tracking_filter_sql = (
+                    f"  AND ({_trk_ok}\n    OR CAST(t.id AS STRING) IN ({_ids_trk}))\n"
+                )
             else:
                 tracking_filter_sql = f"  AND {_trk_ok}\n"
         else:
@@ -436,8 +434,11 @@ WHERE CAST(t.updated_at AS DATE) >= '{_sql_escape(start_date)}'
   AND CAST(t.updated_at AS DATE) <= '{_sql_escape(end_date)}'
   AND t.status IN ({status_list})
   AND (
-    ({grupo_or})
-    OR ({bu_or}){extra_ticket_sql}
+    {(
+        f"({grupo_or}){extra_ticket_sql}"
+        if data_model == DATA_MODEL_AR
+        else f"({grupo_or})\n    OR ({bu_or}){extra_ticket_sql}"
+    )}
   )
 {tracking_filter_sql}ORDER BY total_qtd_rastreio DESC, t.updated_at DESC
 {limit_clause}
@@ -512,7 +513,33 @@ def fetch_dataframe(
         )
     if "total_qtd_rastreio" in df.columns:
         df["total_qtd_rastreio"] = pd.to_numeric(df["total_qtd_rastreio"], errors="coerce")
+    if str(cfg.get("data_model") or "").strip() == DATA_MODEL_AR and not df.empty:
+        df = _enforce_ar_tab_row_filter(df, cfg)
     return df
+
+
+def _normalize_ticket_id_series(s: pd.Series) -> pd.Series:
+    out = s.astype(str).str.strip()
+    out = out.str.replace(r"\.0$", "", regex=True)
+    return out
+
+
+def _enforce_ar_tab_row_filter(df: pd.DataFrame, cfg: dict[str, Any]) -> pd.DataFrame:
+    """Argentina: mantém só tickets cujo grupo contém algum filtro OU id forçado (cobre vazamento na SQL/engine)."""
+    if "ticket_id" not in df.columns or "grupo" not in df.columns:
+        return df
+    grupos = [str(x).strip().lower() for x in (cfg.get("filtro_grupo_contem") or []) if str(x).strip()]
+    if not grupos:
+        return df
+    allowed = set(_ticket_ids_from_env_and_temp_ar(DATA_MODEL_AR))
+    gcol = df["grupo"].fillna("").astype(str).str.lower()
+    mask = pd.Series(False, index=df.index)
+    for p in grupos:
+        mask |= gcol.str.contains(p, regex=False, na=False)
+    if allowed:
+        tid = _normalize_ticket_id_series(df["ticket_id"])
+        mask |= tid.isin(allowed)
+    return df.loc[mask].copy()
 
 
 def main() -> int:

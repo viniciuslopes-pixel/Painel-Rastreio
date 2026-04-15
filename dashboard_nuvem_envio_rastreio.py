@@ -194,19 +194,20 @@ def _run_pending_ne_fetch(raw_cfg: dict) -> None:
         if sk not in st.session_state:
             continue
         params: dict = st.session_state.pop(sk)
-        cfg = ne.effective_config_for_tab(raw_cfg, tab_key)
         sk_df = f"ne_df_{tab_key}"
         sk_meta = f"ne_meta_{tab_key}"
         err_key = f"ne_{tab_key}_fetch_error"
         _render_full_page_loading_ne()
         try:
+            # Sempre raw_cfg + tab_key: o merge por aba fica só em fetch_dataframe (evita config errada).
             df = ne.fetch_dataframe(
                 start_date=params["start"],
                 end_date=params["end"],
                 statuses=list(params["statuses"]),
-                config=cfg,
+                config=raw_cfg,
                 limit=params.get("limit"),
                 only_with_tracking_filled=params.get("somente_rastreio"),
+                tab_key=tab_key,
             )
         except Exception as e:
             st.session_state[err_key] = str(e)
