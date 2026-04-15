@@ -1093,27 +1093,6 @@ def _ne_html_stacked_carriers_volume(
     )
 
 
-def _build_encomendas_ttr_detail_df(df: pd.DataFrame) -> pd.DataFrame:
-    """Uma linha por encomenda/código dentro de `tracking_numbers_data`, com TTR quando houver término."""
-    if "tracking_numbers_data" not in df.columns or "ticket_id" not in df.columns:
-        return pd.DataFrame()
-    chunks: list[pd.DataFrame] = []
-    for _, r in df.iterrows():
-        tid = _norm_ticket_id(r["ticket_id"])
-        st_raw = r.get("status_rastreamento") if "status_rastreamento" in r.index else None
-        sub = flatten_tracking_numbers_data_detail(
-            r.get("tracking_numbers_data"),
-            tid,
-            st_raw,
-            for_argentina_tab=True,
-        )
-        if not sub.empty:
-            chunks.append(sub)
-    if not chunks:
-        return pd.DataFrame()
-    return pd.concat(chunks, ignore_index=True)
-
-
 def _tracking_app_ttr_hours_resolved(created_at: object, completed_at: object) -> float | None:
     """TTR em horas: `createdAt` → término (`finalizadoAt` ou `completedAt`); só com término válido."""
     if completed_at is None:
@@ -2747,9 +2726,6 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
         st.caption("O **tempo médio** só inclui envios já marcados como concluídos.")
 
     _n = len(df)
-    _ar_ttr_det = pd.DataFrame()
-    if is_ar and "tracking_numbers_data" in df.columns:
-        _ar_ttr_det = _build_encomendas_ttr_detail_df(df)
 
     if "ticket_id" not in df.columns:
         st.warning("Não há identificador de ticket nos dados; os gráficos não podem ser montados.")
@@ -2895,131 +2871,6 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
         else:
             st.info("Não há transportadora identificada nos dados desta amostra.")
 
-        if not _ar_ttr_det.empty:
-            st.subheader("Tempo por código de rastreio (Argentina)")
-            st.caption(
-                "Só aparecem envios **já concluídos**. Cada barra horizontal é um **código de rastreio**; o comprimento "
-                "é **quantas horas** levou até concluir."
-            )
-            _ar_color_domain = list(_AR_CARRIER_ORDER) + [_AR_CARRIER_OTHER]
-            _ar_color_range = [_AR_CARRIER_CHART_COLORS[d] for d in _ar_color_domain]
-
-            _ttr_done = _ar_ttr_det[_ar_ttr_det["ttr_horas"].notna()].copy()
-            if not _ttr_done.empty:
-                _mean_by_c = (
-                    _ttr_done.groupby("transportadora_ar", as_index=False)["ttr_horas"]
-                    .mean()
-                    .rename(columns={"ttr_horas": "ttr_medio_h"})
-                )
-                st.caption("Tempo médio de resolução **por transportadora** (só envios já finalizados).")
-                _mean_chart = (
-                    alt.Chart(_mean_by_c)
-                    .mark_bar(cornerRadiusEnd=4)
-                    .encode(
-                        x=alt.X(
-                            "transportadora_ar:N",
-                            title="Transportadora",
-                            sort=_ar_color_domain,
-                        ),
-                        y=alt.Y("ttr_medio_h:Q", title="Horas em média"),
-                        color=alt.Color(
-                            "transportadora_ar:N",
-                            legend=None,
-                            scale=alt.Scale(domain=_ar_color_domain, range=_ar_color_range),
-                        ),
-                        tooltip=[
-                            alt.Tooltip("transportadora_ar:N", title="Transportadora"),
-                            alt.Tooltip("ttr_medio_h:Q", title="Horas em média", format=".2f"),
-                        ],
-                    )
-                    .properties(height=280)
-                )
-                st.altair_chart(_mean_chart, use_container_width=True)
-
-            _top_ttr_tickets = st.number_input(
-                "Quantos tickets incluir (começando pelos com mais códigos)",
-                min_value=1,
-                max_value=max(1, _n),
-                value=min(15, _n),
-                step=1,
-                key=f"ne_{k}_ar_ttr_chart_top_tickets",
-            )
-            _max_seg_chart = st.number_input(
-                "Máximo de barras no gráfico",
-                min_value=10,
-                max_value=400,
-                value=120,
-                step=10,
-                key=f"ne_{k}_ar_ttr_chart_max_seg",
-            )
-            if "ticket_id" in df.columns and "total_qtd_rastreio" in df.columns:
-                _tid_order = (
-                    df.assign(_tid=df["ticket_id"].astype(str).map(_norm_ticket_id))
-                    .sort_values("total_qtd_rastreio", ascending=False)
-                    .drop_duplicates("_tid")
-                    .head(int(_top_ttr_tickets))["_tid"]
-                    .tolist()
-                )
-            else:
-                _g2 = df.assign(_tid=df["ticket_id"].astype(str).map(_norm_ticket_id)).drop_duplicates("_tid")
-                if "updated_at" in _g2.columns:
-                    _g2 = _g2.sort_values("updated_at", ascending=False)
-                _tid_order = _g2.head(int(_top_ttr_tickets))["_tid"].tolist()
-            _set_tid = set(_tid_order)
-            _plot_ttr = _ar_ttr_det[
-                _ar_ttr_det["ticket_id"].isin(_set_tid) & _ar_ttr_det["ttr_horas"].notna()
-            ].copy()
-            if _plot_ttr.empty:
-                st.info(
-                    "Nenhum envio concluído entre os tickets escolhidos — o tempo só aparece quando o caso está finalizado."
-                )
-            else:
-                _plot_ttr["ord_ticket"] = _plot_ttr["ticket_id"].map(
-                    {t: i for i, t in enumerate(_tid_order)}
-                )
-                _plot_ttr["ord_ticket"] = _plot_ttr["ord_ticket"].fillna(9999)
-                _plot_ttr = _plot_ttr.sort_values(
-                    ["ord_ticket", "encomenda_n", "ttr_horas"],
-                    ascending=[True, True, False],
-                ).head(int(_max_seg_chart))
-                _plot_ttr["rotulo"] = (
-                    _plot_ttr["ticket_id"].astype(str)
-                    + " · #"
-                    + _plot_ttr["encomenda_n"].astype(str)
-                    + " · "
-                    + _plot_ttr["codigo_rastreio"].astype(str).str.slice(0, 22)
-                )
-                _h_bar = max(320, min(1200, 20 + 22 * len(_plot_ttr)))
-                _per_code = (
-                    alt.Chart(_plot_ttr)
-                    .mark_bar(cornerRadiusEnd=2)
-                    .encode(
-                        y=alt.Y(
-                            "rotulo:N",
-                            title="",
-                            sort=alt.EncodingSortField(field="ttr_horas", order="descending"),
-                        ),
-                        x=alt.X("ttr_horas:Q", title="Horas até concluir"),
-                        color=alt.Color(
-                            "transportadora_ar:N",
-                            title="Transportadora",
-                            scale=alt.Scale(domain=_ar_color_domain, range=_ar_color_range),
-                        ),
-                        tooltip=[
-                            alt.Tooltip("ticket_id:N", title="Ticket"),
-                            alt.Tooltip("codigo_rastreio:N", title="Código de rastreio"),
-                            alt.Tooltip("transportadora_ar:N", title="Transportadora"),
-                            alt.Tooltip("ttr_horas:Q", title="Horas", format=".2f"),
-                            alt.Tooltip("duracion_app:N", title="Duração informada"),
-                        ],
-                    )
-                    .properties(height=_h_bar)
-                )
-                st.altair_chart(_per_code, use_container_width=True)
-                if len(_ar_ttr_det[_ar_ttr_det["ttr_horas"].notna()]) > int(_max_seg_chart):
-                    st.caption(
-                        f"Mostrando no máximo **{int(_max_seg_chart)}** barras. Aumente o limite acima se quiser ver mais."
-                    )
     else:
         st.subheader("Volume por transportadora")
         st.caption(
@@ -3056,44 +2907,11 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
         else:
             st.info("Não há solicitações por transportadora nesta amostra.")
 
-    if is_ar and "tracking_numbers_data" in df.columns:
-        if not _ar_ttr_det.empty:
-            st.subheader("Planilha — tempo por envio (Argentina)")
-            st.caption(
-                "Cada linha é **um envio/código**. A tabela mostra datas, **horas até concluir** e a **situação**. "
-                "Use o botão abaixo para baixar em CSV."
-            )
-            _ttr_tab = _ar_ttr_det.drop(columns=["transportadora_ar"], errors="ignore")
-            _ttr_view = _ttr_tab.rename(
-                columns={
-                    "ticket_id": "Ticket",
-                    "encomenda_n": "Nº no ticket",
-                    "codigo_rastreio": "Código de rastreio",
-                    "transportadora": "Transportadora",
-                    "created_at": "Aberto em",
-                    "finalizado_em": "Concluído em",
-                    "duracion_app": "Duração informada",
-                    "ttr_horas": "Horas até concluir",
-                    "situacao": "Situação",
-                }
-            )
-            st.dataframe(
-                _ttr_view.head(5000),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.download_button(
-                "Baixar CSV — tempo por envio (AR)",
-                _ar_ttr_det.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"nuvem_envio_ttr_encomendas_{k}.csv",
-                mime="text/csv",
-                key=f"ne_{k}_dl_ttr_encomendas",
-            )
-        elif _app_n_lines == 0 and len(df) > 0:
-            st.info(
-                "Os dados de envio desta amostra não puderam ser lidos no formato esperado. "
-                "Se o problema continuar, envie um exemplo anonimizado para ajustarmos a leitura."
-            )
+    if is_ar and "tracking_numbers_data" in df.columns and _app_n_lines == 0 and len(df) > 0:
+        st.info(
+            "Os dados de envio desta amostra não puderam ser lidos no formato esperado. "
+            "Se o problema continuar, envie um exemplo anonimizado para ajustarmos a leitura."
+        )
 
     st.subheader("Amostra de tickets")
     st.caption(
@@ -3117,8 +2935,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
         st.markdown(
             """
 - **Volume por transportadora:** o gráfico acima já mostra a soma na amostra; para série semanal, exporte o CSV em períodos fixos ou leve o mesmo cálculo ao Looker.
-- **Pedidos “pesados”:** acompanhe tickets com muitos códigos no mesmo caso (use a planilha ou exporte o CSV).
-- **Argentina:** tempo por envio na aba Argentina (tabela e gráficos).
+- **Pedidos “pesados”:** acompanhe tickets com muitos códigos no mesmo caso (gráfico de status ou CSV da amostra).
+- **Argentina:** TTR no painel por ticket e na amostra exportável em CSV.
 - **Qualidade:** cruzar situação do rastreio com volume quando fizer sentido para a operação.
 - **Séries no tempo:** exporte o CSV por períodos fixos ou use o Looker para outras visões.
 - **Alertas:** limiar de tickets/dia acima do histórico (ex.: p95 da semana anterior) para escalar capacidade.
