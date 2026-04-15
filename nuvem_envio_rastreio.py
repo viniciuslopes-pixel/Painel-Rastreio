@@ -356,7 +356,7 @@ def build_sql(
         THEN 0
         ELSE COALESCE(
           TRY_CAST(SIZE(FROM_JSON(TRIM(CAST(p.tracking_numbers_data AS STRING)), 'ARRAY<STRING>')) AS INT),
-          1
+          0
         )
       END"""
         total_qtd_sql = f"(({_n_tr})) AS total_qtd_rastreio"
@@ -473,6 +473,54 @@ WHERE {ticket_date_predicate}
 """
 
 
+def _ar_segment_count_from_tracking_raw(val: object) -> int:
+    """Conta segmentos no JSON do app AR.
+
+    A SQL usa ``ARRAY<STRING>``; o payload real costuma ser ``{ "correo": [...], ... }``.
+    Sem este pós-processamento, ``COALESCE(..., 1)`` na query fazia **todo** ticket não-array
+    aparecer com total **1** na amostra e no ``total_qtd_rastreio``.
+    """
+    if val is None:
+        return 0
+    try:
+        if pd.api.types.is_scalar(val) and pd.isna(val):
+            return 0
+    except (TypeError, ValueError):
+        pass
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            val = val.decode("utf-8")
+        except Exception:
+            return 0
+    try:
+        import numpy as np
+
+        if isinstance(val, np.generic):
+            val = val.item()
+    except ImportError:
+        pass
+    if isinstance(val, dict):
+        if val and all(isinstance(v, list) for v in val.values()):
+            return int(sum(len(v) for v in val.values() if isinstance(v, list)))
+        return 1 if val else 0
+    if isinstance(val, list):
+        return len(val)
+    s = str(val).strip()
+    if not s or s.lower() in ("{}", "[]", "null", "none", "nan"):
+        return 0
+    try:
+        o: object = json.loads(s)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return 0
+    if isinstance(o, dict):
+        if o and all(isinstance(v, list) for v in o.values()):
+            return int(sum(len(v) for v in o.values() if isinstance(v, list)))
+        return 1 if o else 0
+    if isinstance(o, list):
+        return len(o)
+    return 0
+
+
 def fetch_dataframe(
     *,
     start_date: str,
@@ -541,6 +589,15 @@ def fetch_dataframe(
         )
     if "total_qtd_rastreio" in df.columns:
         df["total_qtd_rastreio"] = pd.to_numeric(df["total_qtd_rastreio"], errors="coerce")
+    if (
+        str(cfg.get("data_model") or "").strip() == DATA_MODEL_AR
+        and "tracking_numbers_data" in df.columns
+        and "total_qtd_rastreio" in df.columns
+        and not df.empty
+    ):
+        parsed = df["tracking_numbers_data"].map(_ar_segment_count_from_tracking_raw)
+        sql_t = pd.to_numeric(df["total_qtd_rastreio"], errors="coerce").fillna(0).astype(int)
+        df["total_qtd_rastreio"] = pd.concat([parsed, sql_t], axis=1).max(axis=1).astype(int)
     if str(cfg.get("data_model") or "").strip() == DATA_MODEL_AR and not df.empty:
         df = _enforce_ar_tab_row_filter(df, cfg)
     return df

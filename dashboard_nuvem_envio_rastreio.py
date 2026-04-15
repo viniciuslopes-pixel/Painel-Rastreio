@@ -2418,9 +2418,38 @@ def _ne_truncate_sample_text(val: object, max_len: int = 180) -> str:
     return s[: max_len - 1] + "…"
 
 
+def _ne_format_ticket_id_sample(val: object) -> str:
+    """Ticket id estável na amostra (evita ``7284741.0`` e semelhantes)."""
+    if val is None:
+        return "—"
+    try:
+        if pd.api.types.is_scalar(val) and pd.isna(val):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    return _norm_ticket_id(val)
+
+
+def _ne_format_grupo_sample(val: object) -> str:
+    """Zendesk costuma devolver ``group_id`` como ``-1`` quando não há grupo; evita confusão na amostra."""
+    try:
+        if val is None or (pd.api.types.is_scalar(val) and pd.isna(val)):
+            return "—"
+    except (TypeError, ValueError):
+        pass
+    t = str(val).strip()
+    if not t or t.lower() in ("nan", "none", "-1", "-1.0"):
+        return "—"
+    return t
+
+
 def _ne_prepare_sample_display_df(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     use = [c for c in cols if c in df.columns]
     sub = df.loc[:, use].head(500).copy()
+    if "ticket_id" in sub.columns:
+        sub["ticket_id"] = sub["ticket_id"].map(_ne_format_ticket_id_sample)
+    if "grupo" in sub.columns:
+        sub["grupo"] = sub["grupo"].map(_ne_format_grupo_sample)
     for col in ("tracking_numbers_data", "status_rastreamento"):
         if col in sub.columns:
             sub[col] = sub[col].map(_ne_truncate_sample_text)
