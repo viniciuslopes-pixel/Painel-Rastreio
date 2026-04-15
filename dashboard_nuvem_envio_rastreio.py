@@ -716,6 +716,26 @@ def _ar_carrier_volume_df(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([{"transportadora": k, "volume_solicitacoes": vol[k]} for k in keys])
 
 
+def _ar_count_tracking_codes_in_frame(frame: pd.DataFrame | None) -> int:
+    """Soma de códigos/envios em `tracking_numbers_data` (uma entrada por objeto retornado pelo parse)."""
+    if frame is None or frame.empty or "tracking_numbers_data" not in frame.columns:
+        return 0
+    n = 0
+    for _, r in frame.iterrows():
+        n += len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data")))
+    return int(n)
+
+
+def _ar_max_tracking_codes_one_ticket(frame: pd.DataFrame | None) -> int:
+    """Maior quantidade de códigos num único ticket, pelo mesmo parse de `tracking_numbers_data`."""
+    if frame is None or frame.empty or "tracking_numbers_data" not in frame.columns:
+        return 0
+    m = 0
+    for _, r in frame.iterrows():
+        m = max(m, len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data"))))
+    return int(m)
+
+
 _BR_CARRIER_FILTER_LABELS = ("Correios", "Jadlog", "Loggi")
 
 
@@ -766,6 +786,8 @@ def _ne_html_stacked_carriers_volume(
     vol_df: pd.DataFrame,
     carrier_style: dict[str, tuple[str, str, str]],
     logo_files: dict[str, str],
+    *,
+    total_footer_label: str = "solicitações",
 ) -> str:
     """Barra horizontal empilhada (HTML) — mesmo padrão visual Brasil/Argentina."""
     logo_dir = _DIR / "assets" / "logos"
@@ -814,7 +836,7 @@ def _ne_html_stacked_carriers_volume(
         '<div style="display:flex;width:100%;min-height:88px;border-radius:14px;'
         'overflow:hidden;box-shadow:0 2px 10px rgba(0,0,0,.12);">'
         f"{inner}</div>"
-        f'<p style="margin:8px 0 0 0;font-size:13px;color:#444;">Total: <b>{total:.0f}</b> solicitações'
+        f'<p style="margin:8px 0 0 0;font-size:13px;color:#444;">Total: <b>{total:.0f}</b> {html.escape(total_footer_label)}'
         f" · {_pct_line}</p>"
         "</div>"
     )
@@ -1471,48 +1493,6 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
                 ),
             },
         )
-
-    plot_df = detail_df.copy()
-    for _c in ("guru", "transportadora", "ttr_formatado", "status_operacional", "status_zendesk", "codigo_rastreio"):
-        if _c in plot_df.columns:
-            plot_df[_c] = (
-                plot_df[_c]
-                .astype(str)
-                .replace({"nan": _NE_TBL_DASH, "None": _NE_TBL_DASH, "": _NE_TBL_DASH, "—": _NE_TBL_DASH})
-            )
-    plot_df["codigo_full"] = plot_df["codigo_rastreio"].astype(str)
-    plot_df["codigo"] = plot_df["codigo_full"].str.slice(0, 72)
-    plot_df["n"] = plot_df["encomenda_n"]
-    plot_df["_bar"] = 1
-    plot_df["rotulo"] = (
-        plot_df["n"].astype(str) + " · " + plot_df["codigo"].astype(str).str.slice(0, 36)
-    )
-    _y_order = plot_df.sort_values("n")["rotulo"].astype(str).tolist()
-
-    with st.expander("Gráfico por agente (agentName)", expanded=False):
-        st.caption(
-            "Cada barra é um **código** (vindo de **status_rastreamento** quando existir, senão do JSON de rastreio). "
-            "A cor é o **agente** (**agentName** no objeto, quando houver cruzamento)."
-        )
-        _cg_chart = (
-            alt.Chart(plot_df)
-            .mark_bar(cornerRadiusEnd=2)
-            .encode(
-                x=alt.X("_bar:Q", title=None, axis=None),
-                y=alt.Y("rotulo:N", title="", sort=_y_order),
-                color=alt.Color("guru:N", title="Agente"),
-                tooltip=[
-                    alt.Tooltip("codigo_full:N", title="Código"),
-                    alt.Tooltip("status_zendesk:N", title="Status Zendesk"),
-                    alt.Tooltip("guru:N", title="Agente"),
-                    alt.Tooltip("transportadora:N", title="Transportadora"),
-                    alt.Tooltip("status_operacional:N", title="Status agrupado"),
-                    alt.Tooltip("ttr_formatado:N", title="TTR"),
-                ],
-            )
-            .properties(height=max(200, min(560, 26 * len(plot_df))))
-        )
-        st.altair_chart(_cg_chart, use_container_width=True)
 
     zurl = str(cfg.get("zendesk_ticket_url_template") or "").strip()
     if zurl and "{ticket_id}" in zurl:
@@ -2391,20 +2371,20 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 return str(int(r["volume_solicitacoes"].sum()))
             return "0"
 
-        _vol_ar_total = (
-            int(_vol_df_ar["volume_solicitacoes"].sum())
-            if len(_vol_df_ar) and "volume_solicitacoes" in _vol_df_ar.columns
-            else 0
-        )
+        _tn_loaded = _ar_count_tracking_codes_in_frame(df_loaded)
+        _tn_visible = _ar_count_tracking_codes_in_frame(df)
         c2.metric(
-            "Total de solicitações",
-            _vol_ar_total if len(df) else "—",
-            help="Soma dos códigos no JSON `tracking_numbers_data` (igual ao gráfico por transportadora). "
-            "Difere da coluna SQL `total_qtd_rastreio` quando o parse no warehouse diverge do app.",
+            "Tracking Numbers",
+            _tn_loaded if len(df_loaded) else "—",
+            help="Soma dos códigos em **tracking_numbers_data** (contagem pelo parse do app, um por objeto no JSON), "
+            "em **todos** os tickets retornados nesta consulta — não usa `total_qtd_rastreio` do SQL. "
+            "Com filtro de transportadora, os cards por operadora e o gráfico de barras usam só a amostra filtrada; "
+            f"nesse recorte há **{_tn_visible}** códigos.",
         )
         c3.metric(
             "Máx. códigos em 1 ticket",
-            int(_total_track_series.max()) if len(df) and "total_qtd_rastreio" in df.columns else "—",
+            _ar_max_tracking_codes_one_ticket(df_loaded) if len(df_loaded) else "—",
+            help="Maior número de códigos num único ticket, pelo mesmo parse de **tracking_numbers_data**.",
         )
         c4.metric("Correo Argentino", _ar_vol_label("Correo Argentino"))
         c5.metric("Andreani", _ar_vol_label("Andreani"))
@@ -2558,7 +2538,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
     if is_ar:
         st.subheader("Volume por transportadora (Argentina)")
         st.caption(
-            "Mostra **quantas solicitações** há para **Correo Argentino**, **Andreani** e **E-pick** nesta amostra. "
+            "Mostra **quantos códigos** há em **tracking_numbers_data** para **Correo Argentino**, **Andreani** e **E-pick** "
+            "na amostra **filtrada** (o card **Tracking Numbers** acima soma toda a consulta). "
             "A barra inteira é o total; cada cor é uma transportadora."
         )
         _ar_logo_files = {
@@ -2567,7 +2548,12 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             "E-pick": "epick.png",
         }
         if _vol_df_ar["volume_solicitacoes"].sum() > 0:
-            _html_ar = _ne_html_stacked_carriers_volume(_vol_df_ar, _AR_CARRIER_STYLE, _ar_logo_files)
+            _html_ar = _ne_html_stacked_carriers_volume(
+                _vol_df_ar,
+                _AR_CARRIER_STYLE,
+                _ar_logo_files,
+                total_footer_label="tracking numbers",
+            )
             components.html(_html_ar, height=230, scrolling=False)
         else:
             st.info("Não há transportadora identificada nos dados desta amostra.")
