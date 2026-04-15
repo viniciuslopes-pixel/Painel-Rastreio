@@ -1,5 +1,5 @@
 {
-  "_instrucoes": "Copie este arquivo para nuvem_envio_rastreio_config.json e substitua os placeholders pelos valores do seu Databricks/Zendesk. Brasil: campos de transportadoras + status_rastreamento; Argentina: tracking_numbers_data + status_rastreamento.",
+  "_instrucoes": "Copie para nuvem_envio_rastreio_config.json. filtro_grupo_contem: OR no nome do grupo Zendesk (ex.: Argentina inclui Knowledge Management no exemplo). Código também injeta _EXTRA_GRUPOS_ARGENTINA_TEMP em nuvem_envio_rastreio.py (temporário).",
   "catalog_schema": "seu_catalogo.seu_schema_zendesk",
   "dashboard_base_url": "",
   "zendesk_ticket_url_template": "https://SUA_INSTANCIA.zendesk.com/agent/tickets/{ticket_id}",
@@ -36,7 +36,8 @@
       },
       "filtro_grupo_contem": [
         "grupo argentina 1",
-        "grupo argentina 2"
+        "grupo argentina 2",
+        "Knowledge Management"
       ],
       "filtro_bu_contem": [
         "valor_bu_1",

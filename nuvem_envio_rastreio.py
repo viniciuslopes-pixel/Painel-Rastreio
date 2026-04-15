@@ -123,6 +123,10 @@ _ROOT_KEYS_INHERITED_BY_TAB = (
     "zendesk_ticket_url_template",
 )
 
+# Argentina: OR extra em `filtro_grupo_contem` (além do JSON). Esvazie a tupla para desligar no código.
+# Deploy: use também NE_FILTRO_GRUPO_EXTRA_ARGENTINA (lista separada por vírgula ou ;).
+_EXTRA_GRUPOS_ARGENTINA_TEMP: tuple[str, ...] = ("Knowledge Management",)
+
 DATA_MODEL_BR = "br_three_carriers"
 DATA_MODEL_AR = "ar_tracking_single_field"
 
@@ -151,7 +155,36 @@ def effective_config_for_tab(raw: dict[str, Any], tab_key: str) -> dict[str, Any
         "data_model",
         DATA_MODEL_AR if tab_key == "argentina" else DATA_MODEL_BR,
     )
+    if tab_key == "argentina":
+        _merge_extra_grupos_argentina(merged)
     return merged
+
+
+def _merge_extra_grupos_argentina(merged: dict[str, Any]) -> None:
+    """Acrescenta nomes de grupo ao filtro OR da SQL (aba Argentina)."""
+    extras: list[str] = []
+    seen_e: set[str] = set()
+    for p in _EXTRA_GRUPOS_ARGENTINA_TEMP:
+        t = str(p).strip()
+        if t and t.lower() not in seen_e:
+            extras.append(t)
+            seen_e.add(t.lower())
+    env_raw = (os.environ.get("NE_FILTRO_GRUPO_EXTRA_ARGENTINA") or "").strip()
+    if env_raw:
+        for chunk in env_raw.replace(";", ",").split(","):
+            t = chunk.strip()
+            if t and t.lower() not in seen_e:
+                extras.append(t)
+                seen_e.add(t.lower())
+    if not extras:
+        return
+    fg = [str(x).strip() for x in (merged.get("filtro_grupo_contem") or []) if str(x).strip()]
+    seen = {x.lower() for x in fg}
+    for p in extras:
+        if p.lower() not in seen:
+            fg.append(p)
+            seen.add(p.lower())
+    merged["filtro_grupo_contem"] = fg
 
 
 def _sql_escape(s: str) -> str:
