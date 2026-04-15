@@ -11,12 +11,13 @@ Antes: preencha zendesk_field_ids em nuvem_envio_rastreio_config.json
 (use sql_descobrir_campos_rastreio.sql no Databricks para achar os IDs).
 Abas **Brasil** e **Argentina** em nuvem_envio_rastreio_config.json → `tabs`.
 Brasil: três transportadoras + status por ticket. Argentina: [AR] Envio Nube, volume e tempo por envio.
-Clique no gráfico de status: ?ne_codes=1 mostra códigos + agentName (tracking_numbers_data). Amostra: ?ne_ticket= + ne_tab.
+Detalhe por ticket: gráfico de status, seletor na aba ou ?ne_codes=1 — tabela achatada (tracking_numbers_data) com TTR e status. Amostra: ?ne_ticket= + ne_tab.
 """
 from __future__ import annotations
 
 import hmac
 import json
+import math
 import os
 import sys
 import urllib.parse
@@ -260,6 +261,62 @@ def _normalize_tracking_status_value(val: object) -> str:
     if any(k in s for k in ("open", "opening", "abert", "abiert", "abierto")):
         return "aberto"
     return "outros"
+
+
+_DETAIL_STATUS_INTERNAL_LABEL: dict[str, str] = {
+    "resolvido": "Resolvido",
+    "pendente": "Pendente",
+    "aberto": "Aberto",
+    "sem_status": "Sem informação de status",
+    "outros": "Outros",
+}
+
+
+def _parse_status_rastreamento_lookup(raw: object) -> tuple[dict[str, str], dict[str, str]]:
+    """Extrai do JSON `status_rastreamento` mapas código → texto de status (exato e normalizado)."""
+    exact: dict[str, str] = {}
+    norm: dict[str, str] = {}
+    if raw is None:
+        return exact, norm
+    try:
+        if pd.api.types.is_scalar(raw) and pd.isna(raw):
+            return exact, norm
+    except (TypeError, ValueError):
+        pass
+    s = str(raw).strip()
+    if not s or s.lower() in ("{}", "null", "none", "nan"):
+        return exact, norm
+    try:
+        parsed: object = json.loads(s)
+    except json.JSONDecodeError:
+        return exact, norm
+    if isinstance(parsed, str):
+        try:
+            parsed = json.loads(parsed)
+        except json.JSONDecodeError:
+            return exact, norm
+    if not isinstance(parsed, dict):
+        return exact, norm
+    for k, v in parsed.items():
+        key = str(k).strip()
+        if not key:
+            continue
+        val = "" if v is None else str(v).strip()
+        exact[key] = val
+        nk = key.lower().replace(" ", "").replace("-", "")
+        norm[nk] = val
+    return exact, norm
+
+
+def _lookup_status_rastreamento_value(
+    exact: dict[str, str], norm: dict[str, str], code: str
+) -> str | None:
+    if not code or code.startswith("(sem código"):
+        return None
+    if code in exact:
+        return exact[code]
+    nk = code.lower().replace(" ", "").replace("-", "")
+    return norm.get(nk)
 
 
 def _parse_status_rastreamento_json(raw: object) -> dict[str, int]:
@@ -689,51 +746,16 @@ def _build_encomendas_ttr_detail_df(df: pd.DataFrame) -> pd.DataFrame:
     """Uma linha por encomenda/código dentro de `tracking_numbers_data`, com TTR quando houver término."""
     if "tracking_numbers_data" not in df.columns or "ticket_id" not in df.columns:
         return pd.DataFrame()
-    rows: list[dict[str, object]] = []
+    chunks: list[pd.DataFrame] = []
     for _, r in df.iterrows():
         tid = _norm_ticket_id(r["ticket_id"])
-        raw = r["tracking_numbers_data"]
-        items = _parse_tracking_numbers_app_json(raw)
-        for i, it in enumerate(items, start=1):
-            ca = it.get("createdAt") or it.get("created_at")
-            co = _tracking_segment_end_timestamp(it)
-            ttr = _tracking_app_ttr_hours_resolved(ca, co)
-            cos = ""
-            if co is not None:
-                try:
-                    if not (pd.api.types.is_scalar(co) and pd.isna(co)):
-                        cos = str(co).strip()
-                except (TypeError, ValueError):
-                    cos = str(co).strip()
-            if ttr is not None:
-                situacao = "Concluído"
-            elif not cos or cos.lower() in ("null", "none", "nan"):
-                situacao = "Em aberto"
-            else:
-                situacao = "Tempo não calculado"
-            code = _tracking_display_code(it)
-            car_raw = _tracking_display_carrier(it)
-            car_disp = car_raw if car_raw else "—"
-            car_ar = _ar_canonical_carrier(car_raw)
-            dtxt = _tracking_app_duracion_text(it)
-            rows.append(
-                {
-                    "ticket_id": tid,
-                    "encomenda_n": i,
-                    "codigo_rastreio": code or "—",
-                    "transportadora": car_disp,
-                    "transportadora_ar": car_ar,
-                    "created_at": ca if ca is not None and str(ca).strip() else "—",
-                    "finalizado_em": co if cos else "—",
-                    "duracion_app": dtxt or "—",
-                    "ttr_horas": round(ttr, 2) if ttr is not None else None,
-                    "situacao": situacao,
-                }
-            )
-    if not rows:
+        st_raw = r.get("status_rastreamento") if "status_rastreamento" in r.index else None
+        sub = flatten_tracking_numbers_data_detail(r.get("tracking_numbers_data"), tid, st_raw)
+        if not sub.empty:
+            chunks.append(sub)
+    if not chunks:
         return pd.DataFrame()
-    out = pd.DataFrame(rows)
-    return out
+    return pd.concat(chunks, ignore_index=True)
 
 
 def _tracking_app_ttr_hours_resolved(created_at: object, completed_at: object) -> float | None:
@@ -762,6 +784,135 @@ def _tracking_app_ttr_hours_resolved(created_at: object, completed_at: object) -
         return sec / 3600.0
     except Exception:
         return None
+
+
+def _format_ttr_hours_compact(hours: float | None) -> str:
+    """TTR legível por código (ex.: 2d 4h, 3h, <1h)."""
+    if hours is None:
+        return "—"
+    try:
+        if isinstance(hours, float) and math.isnan(hours):
+            return "—"
+    except TypeError:
+        return "—"
+    try:
+        total_sec = int(round(float(hours) * 3600.0))
+    except (ValueError, OverflowError):
+        return "—"
+    if total_sec < 0:
+        return "—"
+    d, rem = divmod(total_sec, 86400)
+    h, rem = divmod(rem, 3600)
+    m, _sec = divmod(rem, 60)
+    parts: list[str] = []
+    if d:
+        parts.append(f"{d}d")
+    if h:
+        parts.append(f"{h}h")
+    if m and not d and not h:
+        parts.append(f"{m}m")
+    if not parts:
+        if total_sec == 0:
+            return "0"
+        return "<1h"
+    return " ".join(parts)
+
+
+def _tracking_item_inline_status_raw(it: dict) -> str:
+    """Status textual vindo do próprio objeto do app (se existir)."""
+    for key in (
+        "status",
+        "estado",
+        "state",
+        "trackingStatus",
+        "tracking_status",
+        "situation",
+        "situacion",
+        "situacao",
+    ):
+        v = it.get(key)
+        if v is None:
+            continue
+        try:
+            if pd.api.types.is_scalar(v) and pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        t = str(v).strip()
+        if t and t.lower() not in ("null", "none", "nan", "{}"):
+            return t
+    return ""
+
+
+def flatten_tracking_numbers_data_detail(
+    tracking_raw: object,
+    ticket_id: str,
+    status_rastreamento_raw: object | None = None,
+) -> pd.DataFrame:
+    """Achata `tracking_numbers_data` em uma linha por código (Pandas), com TTR e status.
+
+    Trata JSON vazio, string inválida ou estrutura não reconhecida (retorna DataFrame vazio).
+    Colunas incluem rótulos para gráficos existentes (`situacao`, `ttr_horas`, …) e para UI
+    (`status_operacional`, `ttr_formatado`, `guru`).
+    """
+    tid = _norm_ticket_id(ticket_id)
+    ex, nx = _parse_status_rastreamento_lookup(status_rastreamento_raw)
+    items = _parse_tracking_numbers_app_json(tracking_raw)
+    rows: list[dict[str, object]] = []
+    for i, it in enumerate(items, start=1):
+        code = _tracking_display_code(it) or ""
+        display_code = code if code else f"(sem código #{i})"
+        guru = _tracking_agent_name(it)
+        ca = it.get("createdAt") or it.get("created_at")
+        co = _tracking_segment_end_timestamp(it)
+        ttr = _tracking_app_ttr_hours_resolved(ca, co)
+        cos = ""
+        if co is not None:
+            try:
+                if not (pd.api.types.is_scalar(co) and pd.isna(co)):
+                    cos = str(co).strip()
+            except (TypeError, ValueError):
+                cos = str(co).strip()
+        if ttr is not None:
+            situacao = "Concluído"
+        elif not cos or cos.lower() in ("null", "none", "nan"):
+            situacao = "Em aberto"
+        else:
+            situacao = "Tempo não calculado"
+        raw_map = _lookup_status_rastreamento_value(ex, nx, code)
+        raw_inline = _tracking_item_inline_status_raw(it)
+        raw_for = (raw_map or "").strip() or raw_inline
+        if raw_for:
+            cat = _normalize_tracking_status_value(raw_for)
+            op_label = _DETAIL_STATUS_INTERNAL_LABEL.get(cat, "Outros")
+        elif situacao == "Concluído":
+            op_label = "Resolvido"
+        elif situacao == "Em aberto":
+            op_label = "Aberto"
+        else:
+            op_label = "Sem informação de status"
+        car_raw = _tracking_display_carrier(it)
+        car_disp = car_raw if car_raw else "—"
+        car_ar = _ar_canonical_carrier(car_raw)
+        dtxt = _tracking_app_duracion_text(it)
+        rows.append(
+            {
+                "ticket_id": tid,
+                "encomenda_n": i,
+                "codigo_rastreio": display_code,
+                "transportadora": car_disp,
+                "transportadora_ar": car_ar,
+                "created_at": ca if ca is not None and str(ca).strip() else "—",
+                "finalizado_em": co if cos else "—",
+                "duracion_app": dtxt or "—",
+                "ttr_horas": round(ttr, 2) if ttr is not None else None,
+                "situacao": situacao,
+                "status_operacional": op_label,
+                "guru": guru,
+                "ttr_formatado": _format_ttr_hours_compact(ttr),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _app_tracking_ttr_stats(df: pd.DataFrame) -> tuple[pd.Series, int, int]:
@@ -996,23 +1147,32 @@ def _df_row_for_ticket_id(df: pd.DataFrame | None, tid: str) -> pd.Series | None
     return df.loc[m].iloc[0]
 
 
-def _codes_guru_detail_records(raw_tracking: object) -> list[dict[str, object]]:
-    """Uma entrada por item em tracking_numbers_data: código, agente, transportadora."""
-    items = _parse_tracking_numbers_app_json(raw_tracking)
-    rows: list[dict[str, object]] = []
-    for i, it in enumerate(items, start=1):
-        code_full = _tracking_display_code(it) or f"(sem código #{i})"
-        code_disp = code_full if len(code_full) <= 72 else code_full[:71] + "…"
-        rows.append(
-            {
-                "n": i,
-                "codigo": code_disp,
-                "codigo_full": code_full,
-                "guru": _tracking_agent_name(it),
-                "transportadora": _tracking_display_carrier(it) or "—",
-            }
-        )
-    return rows
+_NE_DETAIL_SEL_NONE = "— Nenhum painel —"
+
+
+def _ticket_ids_with_tracking(df: pd.DataFrame | None) -> list[str]:
+    """Tickets que têm ao menos um objeto parseável em `tracking_numbers_data`."""
+    if df is None or df.empty:
+        return []
+    if "ticket_id" not in df.columns or "tracking_numbers_data" not in df.columns:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for _, r in df.iterrows():
+        if not _parse_tracking_numbers_app_json(r.get("tracking_numbers_data")):
+            continue
+        x = _norm_ticket_id(r["ticket_id"])
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+
+    def _sort_key(z: str) -> tuple[int, str]:
+        if z.isdigit():
+            return (0, z.zfill(24))
+        return (1, z)
+
+    return sorted(out, key=_sort_key)
 
 
 def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str) -> None:
@@ -1044,6 +1204,8 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
             st.session_state[f"ne_chart_reset_{tab}"] = int(
                 st.session_state.get(f"ne_chart_reset_{tab}", 0)
             ) + 1
+            for _t in ("brasil", "argentina"):
+                st.session_state[f"ne_ticket_codes_select_{_t}"] = _NE_DETAIL_SEL_NONE
             st.rerun()
 
     sk_df = f"ne_df_{tab}"
@@ -1063,50 +1225,107 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
         st.error("Não há coluna **tracking_numbers_data** neste recorte.")
         return
 
-    recs = _codes_guru_detail_records(row.get("tracking_numbers_data"))
-    if not recs:
+    _st_raw = row.get("status_rastreamento") if "status_rastreamento" in row.index else None
+    detail_df = flatten_tracking_numbers_data_detail(
+        row.get("tracking_numbers_data"), tid, _st_raw
+    )
+    if detail_df.empty:
         st.info(
             "Não foi possível ler códigos em **tracking_numbers_data** (lista vazia ou formato não reconhecido)."
         )
         return
 
-    plot_df = pd.DataFrame(recs)
+    _cand = _ticket_ids_with_tracking(df)
+    if len(_cand) > 1:
+        _psk = f"ne_panel_ticket_switch_{tab}"
+        try:
+            _pidx = _cand.index(tid)
+        except ValueError:
+            _pidx = 0
+        _alt = st.selectbox(
+            "Trocar ticket (mesmos dados carregados)",
+            options=_cand,
+            index=_pidx,
+            key=_psk,
+            help="Lista apenas tickets com JSON de rastreio nesta aba.",
+        )
+        if _norm_ticket_id(str(_alt)) != tid:
+            st.session_state["ne_codes_ticket"] = _norm_ticket_id(str(_alt))
+            st.session_state["ne_codes_tab"] = tab
+            st.session_state["_ne_sync_pick_widget"] = tab
+            st.rerun()
+
+    with st.expander("Tabela detalhada (código, status, guru, TTR)", expanded=True):
+        _disp = detail_df[
+            ["codigo_rastreio", "status_operacional", "guru", "ttr_formatado", "transportadora"]
+        ].rename(
+            columns={
+                "codigo_rastreio": "Código de rastreio",
+                "status_operacional": "Status",
+                "guru": "Guru responsável",
+                "ttr_formatado": "TTR",
+                "transportadora": "Transportadora",
+            }
+        )
+        _status_opts = sorted(
+            set(_TRACKING_STATUS_ORDER) | {str(x) for x in _disp["Status"].dropna().unique()}
+        )
+        st.dataframe(
+            _disp,
+            use_container_width=True,
+            hide_index=True,
+            disabled=True,
+            column_config={
+                "Código de rastreio": st.column_config.TextColumn(
+                    "Código de rastreio", width="large"
+                ),
+                "Status": st.column_config.SelectColumn(
+                    "Status",
+                    options=_status_opts,
+                    required=False,
+                ),
+                "Guru responsável": st.column_config.TextColumn("Guru (agentName)", width="medium"),
+                "TTR": st.column_config.TextColumn(
+                    "TTR",
+                    help="Tempo até resolução quando há início e fim válidos no JSON.",
+                ),
+                "Transportadora": st.column_config.TextColumn("Transportadora", width="small"),
+            },
+        )
+
+    plot_df = detail_df.copy()
+    plot_df["codigo_full"] = plot_df["codigo_rastreio"].astype(str)
+    plot_df["codigo"] = plot_df["codigo_full"].str.slice(0, 72)
+    plot_df["n"] = plot_df["encomenda_n"]
     plot_df["_bar"] = 1
     plot_df["rotulo"] = (
         plot_df["n"].astype(str) + " · " + plot_df["codigo"].astype(str).str.slice(0, 36)
     )
     _y_order = plot_df.sort_values("n")["rotulo"].astype(str).tolist()
 
-    st.subheader("Por código: quem atualizou (agentName)")
-    st.caption(
-        "Cada barra é um código do JSON **tracking_numbers_data**. A cor é o **agente** "
-        "(campo **agentName** ou equivalente no objeto)."
-    )
-    _cg_chart = (
-        alt.Chart(plot_df)
-        .mark_bar(cornerRadiusEnd=2)
-        .encode(
-            x=alt.X("_bar:Q", title=None, axis=None),
-            y=alt.Y("rotulo:N", title="", sort=_y_order),
-            color=alt.Color("guru:N", title="Agente"),
-            tooltip=[
-                alt.Tooltip("codigo_full:N", title="Código"),
-                alt.Tooltip("guru:N", title="Agente"),
-                alt.Tooltip("transportadora:N", title="Transportadora"),
-            ],
+    with st.expander("Gráfico por agente (agentName)", expanded=False):
+        st.caption(
+            "Cada barra é um código do JSON **tracking_numbers_data**. A cor é o **agente** "
+            "(campo **agentName** ou equivalente no objeto)."
         )
-        .properties(height=max(200, min(560, 26 * len(plot_df))))
-    )
-    st.altair_chart(_cg_chart, use_container_width=True)
-
-    _tbl = plot_df[["codigo_full", "guru", "transportadora"]].rename(
-        columns={
-            "codigo_full": "Código de rastreio",
-            "guru": "Agente (agentName)",
-            "transportadora": "Transportadora",
-        }
-    )
-    st.dataframe(_tbl, use_container_width=True, hide_index=True)
+        _cg_chart = (
+            alt.Chart(plot_df)
+            .mark_bar(cornerRadiusEnd=2)
+            .encode(
+                x=alt.X("_bar:Q", title=None, axis=None),
+                y=alt.Y("rotulo:N", title="", sort=_y_order),
+                color=alt.Color("guru:N", title="Agente"),
+                tooltip=[
+                    alt.Tooltip("codigo_full:N", title="Código"),
+                    alt.Tooltip("guru:N", title="Agente"),
+                    alt.Tooltip("transportadora:N", title="Transportadora"),
+                    alt.Tooltip("status_operacional:N", title="Status"),
+                    alt.Tooltip("ttr_formatado:N", title="TTR"),
+                ],
+            )
+            .properties(height=max(200, min(560, 26 * len(plot_df))))
+        )
+        st.altair_chart(_cg_chart, use_container_width=True)
 
     zurl = str(cfg.get("zendesk_ticket_url_template") or "").strip()
     if zurl and "{ticket_id}" in zurl:
@@ -2100,7 +2319,46 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                     if _norm_ticket_id(str(_cur or "")) != _clicked_tid or _cur_tab != k:
                         st.session_state["ne_codes_ticket"] = _clicked_tid
                         st.session_state["ne_codes_tab"] = k
+                        st.session_state["_ne_sync_pick_widget"] = k
                         st.rerun()
+
+            if "tracking_numbers_data" in df.columns:
+                _tk_opts = _ticket_ids_with_tracking(df)
+                if _tk_opts:
+                    _sel_key = f"ne_ticket_codes_select_{k}"
+                    if st.session_state.get("_ne_sync_pick_widget") == k:
+                        st.session_state.pop("_ne_sync_pick_widget", None)
+                        _w = st.session_state.get("ne_codes_ticket")
+                        if _w and _norm_ticket_id(str(_w)) in _tk_opts:
+                            st.session_state[_sel_key] = _norm_ticket_id(str(_w))
+                    if _sel_key not in st.session_state:
+                        st.session_state[_sel_key] = _NE_DETAIL_SEL_NONE
+                    _all_opts = [_NE_DETAIL_SEL_NONE] + _tk_opts
+                    if st.session_state.get(_sel_key) not in _all_opts:
+                        st.session_state[_sel_key] = _NE_DETAIL_SEL_NONE
+                    _picked = st.selectbox(
+                        "Ticket para painel de detalhe (códigos, status, guru, TTR)",
+                        options=_all_opts,
+                        key=_sel_key,
+                        help="Abre o painel no topo da página. **Nenhum painel** fecha o detalhe. "
+                        "Clicar numa barra do gráfico também seleciona o ticket.",
+                    )
+                    _want_tid = st.session_state.get("ne_codes_ticket")
+                    _want_tab = st.session_state.get("ne_codes_tab")
+                    if _picked == _NE_DETAIL_SEL_NONE:
+                        if _want_tab == k and _want_tid:
+                            st.session_state.pop("ne_codes_ticket", None)
+                            st.session_state.pop("ne_codes_tab", None)
+                            st.session_state[f"ne_chart_reset_{k}"] = int(
+                                st.session_state.get(f"ne_chart_reset_{k}", 0)
+                            ) + 1
+                            st.rerun()
+                    else:
+                        _pn = _norm_ticket_id(str(_picked))
+                        if _norm_ticket_id(str(_want_tid or "")) != _pn or _want_tab != k:
+                            st.session_state["ne_codes_ticket"] = _pn
+                            st.session_state["ne_codes_tab"] = k
+                            st.rerun()
 
     if is_ar:
         st.subheader("Volume por transportadora (Argentina)")
@@ -2375,6 +2633,7 @@ _ne_open_codes_panel = str(_ne_qp_codes or "").strip().lower() in ("1", "true", 
 if _ne_qp_ticket and _ne_open_codes_panel:
     st.session_state["ne_codes_ticket"] = _norm_ticket_id(_ne_qp_ticket)
     st.session_state["ne_codes_tab"] = _query_param_first("ne_tab") or "brasil"
+    st.session_state["_ne_sync_pick_widget"] = st.session_state["ne_codes_tab"]
     for _qk in ("ne_ticket", "ne_codes"):
         if _qk in st.query_params:
             del st.query_params[_qk]
