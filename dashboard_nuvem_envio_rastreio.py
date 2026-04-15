@@ -83,7 +83,7 @@ footer {{ visibility: hidden !important; height: 0 !important; }}
   justify-content: center !important;
   box-sizing: border-box !important;
 }}
-form[data-testid="stForm"] {{
+[data-testid="stForm"] {{
   background: #ffffff !important;
   border-radius: 14px !important;
   border: 1px solid rgba(148, 163, 184, 0.2) !important;
@@ -112,55 +112,57 @@ form[data-testid="stForm"] {{
   line-height: 1.45 !important;
 }}
 /* Campos: largura total no card + Base Web */
-form[data-testid="stForm"] [data-testid="stTextInput"],
-form[data-testid="stForm"] .stTextInput {{
+[data-testid="stForm"] [data-testid="stTextInput"],
+[data-testid="stForm"] .stTextInput {{
   width: 100% !important;
   max-width: 100% !important;
 }}
-form[data-testid="stForm"] .stTextInput > div,
-form[data-testid="stForm"] [data-testid="stTextInput"] > div {{
+[data-testid="stForm"] .stTextInput > div,
+[data-testid="stForm"] [data-testid="stTextInput"] > div {{
   width: 100% !important;
 }}
-form[data-testid="stForm"] .stTextInput label,
-form[data-testid="stForm"] [data-testid="stTextInput"] label {{
+[data-testid="stForm"] .stTextInput label,
+[data-testid="stForm"] [data-testid="stTextInput"] label {{
   font-weight: 500 !important;
   color: #334155 !important;
   font-size: 0.875rem !important;
 }}
-form[data-testid="stForm"] .stTextInput [data-baseweb="input"],
-form[data-testid="stForm"] [data-testid="stTextInput"] [data-baseweb="input"] {{
+[data-testid="stForm"] .stTextInput [data-baseweb="input"],
+[data-testid="stForm"] [data-testid="stTextInput"] [data-baseweb="input"] {{
   border-radius: 12px !important;
   border-color: #e2e8f0 !important;
   background-color: #fafbfc !important;
 }}
-form[data-testid="stForm"] .stTextInput [data-baseweb="input"]:focus-within,
-form[data-testid="stForm"] [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {{
+[data-testid="stForm"] .stTextInput [data-baseweb="input"]:focus-within,
+[data-testid="stForm"] [data-testid="stTextInput"] [data-baseweb="input"]:focus-within {{
   border-color: {blue} !important;
   box-shadow: 0 0 0 1px {blue} !important;
 }}
-form[data-testid="stForm"] div[data-baseweb="input"] > div {{
+[data-testid="stForm"] div[data-baseweb="input"] > div {{
   border-radius: 12px !important;
   border-color: #e2e8f0 !important;
 }}
-form[data-testid="stForm"] div[data-baseweb="input"]:focus-within > div {{
+[data-testid="stForm"] div[data-baseweb="input"]:focus-within > div {{
   border-color: {blue} !important;
   box-shadow: 0 0 0 1px {blue} !important;
 }}
-/* Botão Entrar — sobrescreve tema global (incl. vermelho primário) */
-form[data-testid="stForm"] .stButton,
-form[data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+/* Botão Entrar — Streamlit usa div[data-testid=stForm] + button[data-testid=stBaseButton-primaryFormSubmit] */
+[data-testid="stForm"] .stButton,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
   width: 100% !important;
 }}
-form[data-testid="stForm"] [data-baseweb="button"] {{
+[data-testid="stForm"] [data-baseweb="button"] {{
   border: none !important;
   box-shadow: none !important;
   outline: none !important;
   background: transparent !important;
 }}
-form[data-testid="stForm"] .stButton > button,
-form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button,
-html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[data-testid="baseButton-primary"],
-html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"] {{
+[data-testid="stForm"] .stButton > button,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] button,
+[data-testid="stForm"] button[data-testid="stBaseButton-primaryFormSubmit"],
+[data-testid="stForm"] button[kind="primaryFormSubmit"],
+[data-testid="stForm"] button[data-testid="baseButton-primary"],
+[data-testid="stForm"] button[kind="primary"] {{
   width: 100% !important;
   background-color: {blue} !important;
   background-image: none !important;
@@ -176,9 +178,17 @@ html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[k
   margin-top: 0.35rem !important;
   box-shadow: none !important;
 }}
-form[data-testid="stForm"] .stButton > button:hover,
-form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:hover,
-html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"]:hover {{
+/* Rótulo markdown dentro do submit (Streamlit aplica cor de link / primary no texto) */
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"],
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"] span {{
+  color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+}}
+[data-testid="stForm"] .stButton > button:hover,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:hover,
+[data-testid="stForm"] button[kind="primaryFormSubmit"]:hover,
+[data-testid="stForm"] button[kind="primary"]:hover {{
   background-color: {blue_h} !important;
   background-image: none !important;
   color: #ffffff !important;
@@ -186,19 +196,25 @@ html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[k
   border: none !important;
   border-color: transparent !important;
 }}
-form[data-testid="stForm"] .stButton > button:focus,
-form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:focus,
-html body [data-testid="stAppViewContainer"] form[data-testid="stForm"] button[kind="primary"]:focus {{
+[data-testid="stForm"] .stButton > button:focus,
+[data-testid="stForm"] .stButton > button:focus-visible,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:focus,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:focus-visible,
+[data-testid="stForm"] button[kind="primaryFormSubmit"]:focus,
+[data-testid="stForm"] button[kind="primaryFormSubmit"]:focus-visible {{
   outline: 2px solid rgba(0, 69, 255, 0.35) !important;
   outline-offset: 2px !important;
   border: none !important;
   border-color: transparent !important;
   box-shadow: none !important;
 }}
-form[data-testid="stForm"] .stButton > button:active,
-form[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:active {{
+[data-testid="stForm"] .stButton > button:active,
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] button:active,
+[data-testid="stForm"] button[kind="primaryFormSubmit"]:active {{
   background-color: {blue_h} !important;
   color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
+  border-color: transparent !important;
 }}
 </style>
 """
@@ -2438,6 +2454,35 @@ def _inject_ne_theme() -> None:
         html body [data-testid="stAppViewContainer"] .main [data-testid="stButton"] button[kind="primary"]:hover {{
             background-color: {_NE_ACCENT_HOVER} !important;
             border-color: {_NE_ACCENT_HOVER} !important;
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }}
+        /* st.form_submit_button(type="primary"): widget é stFormSubmitButton, NÃO stButton — kind no DOM é primaryFormSubmit */
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"],
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"] {{
+            background-color: {_NE_NS_BLUE} !important;
+            border-color: {_NE_NS_BLUE} !important;
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+            font-weight: 700 !important;
+        }}
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"]:hover,
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"]:hover {{
+            background-color: {_NE_NS_BLUE_HOVER} !important;
+            border-color: {_NE_NS_BLUE_HOVER} !important;
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }}
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] button[kind="primaryFormSubmit"]:active,
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] button[data-testid="stBaseButton-primaryFormSubmit"]:active {{
+            background-color: {_NE_NS_BLUE_HOVER} !important;
+            border-color: {_NE_NS_BLUE_HOVER} !important;
+            color: #ffffff !important;
+            -webkit-text-fill-color: #ffffff !important;
+        }}
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"],
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"] p,
+        html body [data-testid="stAppViewContainer"] [data-testid="stFormSubmitButton"] [data-testid="stMarkdownContainer"] span {{
             color: #ffffff !important;
             -webkit-text-fill-color: #ffffff !important;
         }}
