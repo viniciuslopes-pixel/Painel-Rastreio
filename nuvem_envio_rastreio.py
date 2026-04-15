@@ -127,6 +127,9 @@ _ROOT_KEYS_INHERITED_BY_TAB = (
 # Deploy: use também NE_FILTRO_GRUPO_EXTRA_ARGENTINA (lista separada por vírgula ou ;).
 _EXTRA_GRUPOS_ARGENTINA_TEMP: tuple[str, ...] = ("Knowledge Management",)
 
+# Argentina: estes ticket_id entram na query mesmo fora de grupo/BU (OR no WHERE). Esvazie após testes.
+_EXTRA_TICKET_IDS_ARGENTINA_TEMP: tuple[str, ...] = ("7268849",)
+
 DATA_MODEL_BR = "br_three_carriers"
 DATA_MODEL_AR = "ar_tracking_single_field"
 
@@ -189,6 +192,26 @@ def _merge_extra_grupos_argentina(merged: dict[str, Any]) -> None:
 
 def _sql_escape(s: str) -> str:
     return s.replace("'", "''")
+
+
+def _ticket_ids_from_env_and_temp_ar(data_model: str) -> list[str]:
+    """IDs numéricos para OR no WHERE (Argentina: env + tupla temporária)."""
+    raw = (os.environ.get("NE_INCLUIR_TICKET_IDS") or "").strip()
+    out: list[str] = []
+    for part in raw.replace(";", ",").split(","):
+        s = str(part).strip().lstrip("#")
+        if s.endswith(".0") and s[:-2].isdigit():
+            s = s[:-2]
+        if s.isdigit() and s not in out:
+            out.append(s)
+    if data_model == DATA_MODEL_AR:
+        for x in _EXTRA_TICKET_IDS_ARGENTINA_TEMP:
+            xs = str(x).strip().lstrip("#")
+            if xs.endswith(".0") and xs[:-2].isdigit():
+                xs = xs[:-2]
+            if xs.isdigit() and xs not in out:
+                out.append(xs)
+    return out
 
 
 _QTY_FIELDS = (
@@ -276,6 +299,12 @@ def build_sql(
         f"LOWER(COALESCE(p.bu, '')) LIKE '%{_sql_escape(b.lower())}%'" for b in bus
     )
 
+    extra_ticket_sql = ""
+    _tid_force = _ticket_ids_from_env_and_temp_ar(data_model)
+    if _tid_force:
+        _ids_sql = ", ".join(f"'{_sql_escape(x)}'" for x in _tid_force)
+        extra_ticket_sql = f" OR CAST(t.id AS STRING) IN ({_ids_sql})"
+
     status_list = ", ".join(f"'{_sql_escape(s)}'" for s in statuses)
 
     limit_clause = ""
@@ -287,9 +316,8 @@ def build_sql(
     logical_set = {c[0] for c in extra_cols}
 
     if data_model == DATA_MODEL_AR and "tracking_numbers_data" in logical_set:
-        # Conta itens se for JSON array; senão 1 se houver texto não vazio (Zendesk pode variar o formato).
-        total_qtd_sql = """(
-      CASE
+        # Quantidade para ordenação: maior entre contagem no JSON de tracking e chaves em status_rastreamento.
+        _n_tr = """CASE
         WHEN p.tracking_numbers_data IS NULL
           OR TRIM(CAST(p.tracking_numbers_data AS STRING)) IN ('', '{}', 'null', '[]')
         THEN 0
@@ -297,8 +325,27 @@ def build_sql(
           TRY_CAST(SIZE(FROM_JSON(TRIM(CAST(p.tracking_numbers_data AS STRING)), 'ARRAY<STRING>')) AS INT),
           1
         )
-      END
-    ) AS total_qtd_rastreio"""
+      END"""
+        if "status_rastreamento" in logical_set:
+            _n_st = """CASE
+        WHEN p.status_rastreamento IS NULL
+          OR TRIM(CAST(p.status_rastreamento AS STRING)) IN ('', '{}', 'null', '[]')
+          OR LOWER(TRIM(CAST(p.status_rastreamento AS STRING))) IN ('null', 'none')
+        THEN 0
+        ELSE COALESCE(
+          TRY_CAST(SIZE(FROM_JSON(TRIM(CAST(p.status_rastreamento AS STRING)), 'MAP<STRING,STRING>')) AS INT),
+          1
+        )
+      END"""
+            total_qtd_sql = (
+                "(GREATEST(CAST(("
+                + _n_tr
+                + ") AS BIGINT), COALESCE(CAST(("
+                + _n_st
+                + ") AS BIGINT), CAST(0 AS BIGINT)))) AS total_qtd_rastreio"
+            )
+        else:
+            total_qtd_sql = f"(({_n_tr})) AS total_qtd_rastreio"
     else:
         sum_parts = [
             f"COALESCE(TRY_CAST(p.{f} AS INT), 0)"
@@ -314,11 +361,20 @@ def build_sql(
     tracking_filter_sql = ""
     if only_with_tracking_filled and extra_cols:
         if data_model == DATA_MODEL_AR and "tracking_numbers_data" in logical_set:
-            tracking_filter_sql = """  AND (
+            _trk_ok = """(
       p.tracking_numbers_data IS NOT NULL
       AND TRIM(CAST(p.tracking_numbers_data AS STRING)) NOT IN ('', '{}', 'null', '[]')
-    )
-"""
+    )"""
+            if "status_rastreamento" in logical_set:
+                _st_ok = """(
+      p.status_rastreamento IS NOT NULL
+      AND TRIM(CAST(p.status_rastreamento AS STRING)) != ''
+      AND TRIM(CAST(p.status_rastreamento AS STRING)) != '{}'
+      AND LOWER(TRIM(CAST(p.status_rastreamento AS STRING))) NOT IN ('null', 'none')
+    )"""
+                tracking_filter_sql = f"  AND ({_trk_ok}\n    OR {_st_ok})\n"
+            else:
+                tracking_filter_sql = f"  AND {_trk_ok}\n"
         else:
             qty_checks = [
                 f"COALESCE(TRY_CAST(p.{f} AS INT), 0) > 0"
@@ -377,7 +433,7 @@ WHERE CAST(t.updated_at AS DATE) >= '{_sql_escape(start_date)}'
   AND t.status IN ({status_list})
   AND (
     ({grupo_or})
-    OR ({bu_or})
+    OR ({bu_or}){extra_ticket_sql}
   )
 {tracking_filter_sql}ORDER BY total_qtd_rastreio DESC, t.updated_at DESC
 {limit_clause}
