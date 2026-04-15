@@ -747,18 +747,34 @@ def _ar_codes_per_row_for_metrics(r: pd.Series) -> int:
     return n
 
 
-def _ar_count_tracking_codes_in_frame(frame: pd.DataFrame | None) -> int:
-    """Soma de códigos na amostra: parse do JSON por ticket, com fallback em `total_qtd_rastreio` quando o parse vazio."""
+def _ar_count_tracking_codes_in_frame(
+    frame: pd.DataFrame | None,
+    *,
+    min_one_per_ticket_if_rastreio: bool = False,
+) -> int:
+    """Soma de códigos na amostra (parse + fallbacks). Com filtro “só com rastreio”, cada linha conta no mínimo 1."""
     if frame is None or frame.empty:
         return 0
-    return int(sum(_ar_codes_per_row_for_metrics(r) for _, r in frame.iterrows()))
+    per = [_ar_codes_per_row_for_metrics(r) for _, r in frame.iterrows()]
+    if min_one_per_ticket_if_rastreio:
+        return int(sum(max(x, 1) for x in per))
+    return int(sum(per))
 
 
-def _ar_max_tracking_codes_one_ticket(frame: pd.DataFrame | None) -> int:
+def _ar_max_tracking_codes_one_ticket(
+    frame: pd.DataFrame | None,
+    *,
+    min_one_per_ticket_if_rastreio: bool = False,
+) -> int:
     """Maior quantidade de códigos num único ticket (mesma regra que `_ar_codes_per_row_for_metrics`)."""
     if frame is None or frame.empty:
         return 0
-    return max((_ar_codes_per_row_for_metrics(r) for _, r in frame.iterrows()), default=0)
+    per = [_ar_codes_per_row_for_metrics(r) for _, r in frame.iterrows()]
+    if not per:
+        return 0
+    if min_one_per_ticket_if_rastreio:
+        return int(max(max(x, 1) for x in per))
+    return int(max(per))
 
 
 _BR_CARRIER_FILTER_LABELS = ("Correios", "Jadlog", "Loggi")
@@ -2421,20 +2437,28 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 return str(int(r["volume_solicitacoes"].sum()))
             return "0"
 
-        _tn_loaded = _ar_count_tracking_codes_in_frame(df_loaded)
-        _tn_visible = _ar_count_tracking_codes_in_frame(df)
+        _min1 = bool(is_ar and _meta.get("somente_rastreio", True))
+        _tn_loaded = _ar_count_tracking_codes_in_frame(
+            df_loaded, min_one_per_ticket_if_rastreio=_min1
+        )
+        _tn_visible = _ar_count_tracking_codes_in_frame(df, min_one_per_ticket_if_rastreio=_min1)
         c2.metric(
             "Tracking Numbers",
             _tn_loaded if len(df_loaded) else "—",
-            help="Soma de códigos por ticket: **parse** de **tracking_numbers_data**; se 0, usa **total_qtd_rastreio** (SQL); "
-            "se ainda 0 mas o campo de tracking **não está vazio**, conta **1** por ticket (caiu no filtro de rastreio). "
-            "Com filtro de transportadora, os cards por operadora e o gráfico de volume usam só a amostra filtrada; "
-            f"nesse recorte há **{_tn_visible}** códigos.",
+            help="Soma de códigos por ticket: **parse** de **tracking_numbers_data**; se 0, **total_qtd_rastreio** (SQL); "
+            "se ainda 0, **1** se o campo tracking não estiver vazio. "
+            "Se a consulta foi com **só com rastreio**, cada ticket entra com **no mínimo 1** (alinha ao card Tickets quando há ticket forçado ou JSON vazio no parse). "
+            "Cards por operadora somam só o que o parse classifica (podem ser menores). "
+            f"Na amostra filtrada por transportadora: **{_tn_visible}**.",
         )
         c3.metric(
             "Máx. códigos em 1 ticket",
-            _ar_max_tracking_codes_one_ticket(df_loaded) if len(df_loaded) else "—",
-            help="Maior número de códigos num único ticket (parse do JSON ou fallback **total_qtd_rastreio**).",
+            _ar_max_tracking_codes_one_ticket(
+                df_loaded, min_one_per_ticket_if_rastreio=_min1
+            )
+            if len(df_loaded)
+            else "—",
+            help="Maior número de códigos num único ticket (parse / SQL / mínimo 1 com filtro só rastreio).",
         )
         c4.metric("Correo Argentino", _ar_vol_label("Correo Argentino"))
         c5.metric("Andreani", _ar_vol_label("Andreani"))
