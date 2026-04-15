@@ -716,24 +716,49 @@ def _ar_carrier_volume_df(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame([{"transportadora": k, "volume_solicitacoes": vol[k]} for k in keys])
 
 
-def _ar_count_tracking_codes_in_frame(frame: pd.DataFrame | None) -> int:
-    """Soma de códigos/envios em `tracking_numbers_data` (uma entrada por objeto retornado pelo parse)."""
-    if frame is None or frame.empty or "tracking_numbers_data" not in frame.columns:
-        return 0
+def _ar_raw_tracking_field_nonempty(raw: object) -> bool:
+    """True se o custom field de tracking não está vazio (mesmo quando parse/SQL devolvem 0)."""
+    if raw is None:
+        return False
+    try:
+        if pd.api.types.is_scalar(raw) and pd.isna(raw):
+            return False
+    except (TypeError, ValueError):
+        pass
+    s = str(raw).strip().lower()
+    if not s or s in ("{}", "[]", "null", "none", "nan"):
+        return False
+    return True
+
+
+def _ar_codes_per_row_for_metrics(r: pd.Series) -> int:
+    """Códigos por ticket: parse JSON → total SQL → 1 se o campo tracking vier preenchido (ticket passou no filtro)."""
     n = 0
-    for _, r in frame.iterrows():
-        n += len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data")))
-    return int(n)
+    if "tracking_numbers_data" in r.index:
+        n = len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data")))
+    if n == 0 and "total_qtd_rastreio" in r.index:
+        v = pd.to_numeric(r.get("total_qtd_rastreio"), errors="coerce")
+        if pd.notna(v):
+            n = max(0, int(v))
+    if n == 0 and "tracking_numbers_data" in r.index and _ar_raw_tracking_field_nonempty(
+        r.get("tracking_numbers_data")
+    ):
+        n = 1
+    return n
+
+
+def _ar_count_tracking_codes_in_frame(frame: pd.DataFrame | None) -> int:
+    """Soma de códigos na amostra: parse do JSON por ticket, com fallback em `total_qtd_rastreio` quando o parse vazio."""
+    if frame is None or frame.empty:
+        return 0
+    return int(sum(_ar_codes_per_row_for_metrics(r) for _, r in frame.iterrows()))
 
 
 def _ar_max_tracking_codes_one_ticket(frame: pd.DataFrame | None) -> int:
-    """Maior quantidade de códigos num único ticket, pelo mesmo parse de `tracking_numbers_data`."""
-    if frame is None or frame.empty or "tracking_numbers_data" not in frame.columns:
+    """Maior quantidade de códigos num único ticket (mesma regra que `_ar_codes_per_row_for_metrics`)."""
+    if frame is None or frame.empty:
         return 0
-    m = 0
-    for _, r in frame.iterrows():
-        m = max(m, len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data"))))
-    return int(m)
+    return max((_ar_codes_per_row_for_metrics(r) for _, r in frame.iterrows()), default=0)
 
 
 _BR_CARRIER_FILTER_LABELS = ("Correios", "Jadlog", "Loggi")
@@ -1356,6 +1381,29 @@ def _ticket_ids_with_tracking(df: pd.DataFrame | None) -> list[str]:
     return sorted(out, key=_sort_key)
 
 
+def _ticket_ids_for_detail_select(df: pd.DataFrame | None, tab_key: str) -> list[str]:
+    """Lista de tickets no seletor / painel de códigos: na Argentina, todos os da tabela (df); no Brasil, só com parse."""
+    if df is None or df.empty or "ticket_id" not in df.columns:
+        return []
+    if tab_key == "argentina":
+        seen: set[str] = set()
+        out: list[str] = []
+        for _, r in df.iterrows():
+            x = _norm_ticket_id(r["ticket_id"])
+            if not x or x in seen:
+                continue
+            seen.add(x)
+            out.append(x)
+
+        def _sk(z: str) -> tuple[int, str]:
+            if z.isdigit():
+                return (0, z.zfill(24))
+            return (1, z)
+
+        return sorted(out, key=_sk)
+    return _ticket_ids_with_tracking(df)
+
+
 def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str) -> None:
     """Painel após clique no gráfico de status: códigos + guru (agentName) por linha do JSON."""
     tid = _norm_ticket_id(ticket_id)
@@ -1427,7 +1475,7 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
             )
         )
 
-    _cand = _ticket_ids_with_tracking(df)
+    _cand = _ticket_ids_for_detail_select(df, tab)
     if len(_cand) > 1:
         _psk = f"ne_panel_ticket_switch_{tab}"
         try:
@@ -2175,7 +2223,9 @@ def _ne_sample_column_config(cols: list[str]) -> dict[str, object]:
 def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
     """Conteúdo de uma aba (Brasil ou Argentina): filtros, métricas, gráficos, tabela, CSV."""
     cfg = ne.effective_config_for_tab(raw_cfg, tab_key)
-    is_ar = cfg.get("data_model") == ne.DATA_MODEL_AR
+    # Aba Argentina sempre usa métricas/JSON AR (rótulo Tracking Numbers, etc.), mesmo se
+    # `data_model` no JSON estiver incorreto — antes caía no ramo Brasil ("Total de solicitações").
+    is_ar = tab_key == "argentina"
     k = tab_key
     sk_df = f"ne_df_{k}"
     sk_meta = f"ne_meta_{k}"
@@ -2376,15 +2426,15 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
         c2.metric(
             "Tracking Numbers",
             _tn_loaded if len(df_loaded) else "—",
-            help="Soma dos códigos em **tracking_numbers_data** (contagem pelo parse do app, um por objeto no JSON), "
-            "em **todos** os tickets retornados nesta consulta — não usa `total_qtd_rastreio` do SQL. "
-            "Com filtro de transportadora, os cards por operadora e o gráfico de barras usam só a amostra filtrada; "
+            help="Soma de códigos por ticket: **parse** de **tracking_numbers_data**; se 0, usa **total_qtd_rastreio** (SQL); "
+            "se ainda 0 mas o campo de tracking **não está vazio**, conta **1** por ticket (caiu no filtro de rastreio). "
+            "Com filtro de transportadora, os cards por operadora e o gráfico de volume usam só a amostra filtrada; "
             f"nesse recorte há **{_tn_visible}** códigos.",
         )
         c3.metric(
             "Máx. códigos em 1 ticket",
             _ar_max_tracking_codes_one_ticket(df_loaded) if len(df_loaded) else "—",
-            help="Maior número de códigos num único ticket, pelo mesmo parse de **tracking_numbers_data**.",
+            help="Maior número de códigos num único ticket (parse do JSON ou fallback **total_qtd_rastreio**).",
         )
         c4.metric("Correo Argentino", _ar_vol_label("Correo Argentino"))
         c5.metric("Andreani", _ar_vol_label("Andreani"))
@@ -2430,8 +2480,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             st.caption(
                 "Cada linha é um ticket. A barra mostra **quantos códigos de rastreio** há em cada tipo de situação "
                 "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**. "
-                "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status** "
-                "(largura mínima 1 quando não há total). "
+                "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status**; "
+                "a largura usa o total de códigos quando existir, senão **1** só para o ticket aparecer no eixo (não significa “1 código” real). "
                 "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
                 "cada código em **tracking_numbers_data** e o **agente** (**agentName**)."
             )
@@ -2498,7 +2548,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                         st.rerun()
 
             if "tracking_numbers_data" in df.columns:
-                _tk_opts = _ticket_ids_with_tracking(df)
+                _tk_opts = _ticket_ids_for_detail_select(df, k)
                 if _tk_opts:
                     _sel_key = f"ne_ticket_codes_select_{k}"
                     if st.session_state.get("_ne_sync_pick_widget") == k:
@@ -2552,7 +2602,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 _vol_df_ar,
                 _AR_CARRIER_STYLE,
                 _ar_logo_files,
-                total_footer_label="tracking numbers",
+                total_footer_label="Tracking Numbers",
             )
             components.html(_html_ar, height=230, scrolling=False)
         else:
