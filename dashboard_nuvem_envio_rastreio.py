@@ -1435,11 +1435,12 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
                 "Status": _status_cells,
             }
         )
+        # Só texto — evita falha na serialização Arrow; sem ``disabled=`` (não existe na API atual).
+        _disp = _disp.astype(str)
         st.dataframe(
             _disp,
             use_container_width=True,
             hide_index=True,
-            disabled=True,
             column_config={
                 "Código": st.column_config.TextColumn("Código", width="large"),
                 "Guru": st.column_config.TextColumn("Guru", width="medium"),
