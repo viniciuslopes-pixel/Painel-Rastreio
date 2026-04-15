@@ -348,14 +348,25 @@ def build_sql(
 
     logical_set = {c[0] for c in extra_cols}
 
+    _trk_fid_ar = ""
+    if data_model == DATA_MODEL_AR:
+        for logical, fid_s in extra_cols:
+            if logical == "tracking_numbers_data" and str(fid_s).strip():
+                _trk_fid_ar = str(fid_s).strip()
+                break
+    _use_trk_fb = data_model == DATA_MODEL_AR and bool(_trk_fid_ar)
+    _trk_src_sql = (
+        "COALESCE(p.tracking_numbers_data, fb.trk_val)" if _use_trk_fb else "p.tracking_numbers_data"
+    )
+
     if data_model == DATA_MODEL_AR and "tracking_numbers_data" in logical_set:
-        # Quantidade para ordenação: só contagem no JSON de tracking.
-        _n_tr = """CASE
-        WHEN p.tracking_numbers_data IS NULL
-          OR TRIM(CAST(p.tracking_numbers_data AS STRING)) IN ('', '{}', 'null', '[]')
+        # Quantidade na SQL ainda usa ARRAY<STRING> (legado); o total correto vem do pós-processamento Python.
+        _n_tr = f"""CASE
+        WHEN ({_trk_src_sql}) IS NULL
+          OR TRIM(CAST(({_trk_src_sql}) AS STRING)) IN ('', '{{}}', 'null', '[]')
         THEN 0
         ELSE COALESCE(
-          TRY_CAST(SIZE(FROM_JSON(TRIM(CAST(p.tracking_numbers_data AS STRING)), 'ARRAY<STRING>')) AS INT),
+          TRY_CAST(SIZE(FROM_JSON(TRIM(CAST(({_trk_src_sql}) AS STRING)), 'ARRAY<STRING>')) AS INT),
           0
         )
       END"""
@@ -375,9 +386,9 @@ def build_sql(
     tracking_filter_sql = ""
     if only_with_tracking_filled and extra_cols:
         if data_model == DATA_MODEL_AR and "tracking_numbers_data" in logical_set:
-            _trk_ok = """(
-      p.tracking_numbers_data IS NOT NULL
-      AND TRIM(CAST(p.tracking_numbers_data AS STRING)) NOT IN ('', '{}', 'null', '[]')
+            _trk_ok = f"""(
+      ({_trk_src_sql}) IS NOT NULL
+      AND TRIM(CAST(({_trk_src_sql}) AS STRING)) NOT IN ('', '{{}}', 'null', '[]')
     )"""
             if _tid_force:
                 _ids_trk = ", ".join(
@@ -427,6 +438,29 @@ def build_sql(
     else:
         ticket_date_predicate = _date_core
 
+    if extra_cols:
+        _sel_extra = []
+        for logical, _fid in extra_cols:
+            if _use_trk_fb and logical == "tracking_numbers_data":
+                _sel_extra.append(f"COALESCE(p.{logical}, fb.trk_val) AS {logical}")
+            else:
+                _sel_extra.append(f"p.{logical}")
+        _extra_select_sql = ", ".join(_sel_extra)
+    else:
+        _extra_select_sql = "CAST(NULL AS STRING) AS _sem_campos_opcionais"
+
+    _cte_trk_fb = ""
+    _join_trk_fb = ""
+    if _use_trk_fb:
+        _cte_trk_fb = f""",
+cf_trk_fb AS (
+    SELECT CAST(ticket_id AS STRING) AS tid_s, MAX(cf_val) AS trk_val
+    FROM cf_raw
+    WHERE cf_id = '{_sql_escape(_trk_fid_ar)}'
+    GROUP BY CAST(ticket_id AS STRING)
+)"""
+        _join_trk_fb = "\nLEFT JOIN cf_trk_fb fb ON fb.tid_s = CAST(t.id AS STRING)"
+
     return f"""
 WITH cf_raw AS (
     SELECT
@@ -446,7 +480,7 @@ cf_pivot AS (
     WHERE cf_id IN ({id_in_list})
       AND cf_val IS NOT NULL AND cf_val != '' AND cf_val != 'null'
     GROUP BY ticket_id
-)
+){_cte_trk_fb}
 SELECT
     t.id AS ticket_id,
     t.status,
@@ -454,11 +488,11 @@ SELECT
     CAST(t.updated_at AS TIMESTAMP) AS updated_at,
     COALESCE(g.name, CAST(t.group_id AS STRING)) AS grupo,
     p.bu,
-    {", ".join(f"p.{c[0]}" for c in extra_cols) if extra_cols else "CAST(NULL AS STRING) AS _sem_campos_opcionais"},
+    {_extra_select_sql},
     {total_qtd_sql}
 FROM {schema}.tickets t
 LEFT JOIN {schema}.groups g ON t.group_id = g.id
-LEFT JOIN cf_pivot p ON p.ticket_id = t.id
+LEFT JOIN cf_pivot p ON CAST(p.ticket_id AS STRING) = CAST(t.id AS STRING){_join_trk_fb}
 WHERE {ticket_date_predicate}
   AND t.status IN ({status_list})
   AND (
