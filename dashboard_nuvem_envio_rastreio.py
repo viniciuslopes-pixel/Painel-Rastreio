@@ -290,6 +290,10 @@ def _ne_ensure_dashboard_auth() -> None:
         )
         if ok_u and ok_p:
             st.session_state["ne_auth_ok"] = True
+            # Evita um frame com st.error de fetch antigo ao entrar no painel.
+            for _ek in list(st.session_state.keys()):
+                if str(_ek).endswith("_fetch_error"):
+                    st.session_state.pop(_ek, None)
             st.rerun()
         st.error("Usuário ou senha incorretos.")
 
@@ -3187,19 +3191,13 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
 
 
 st.set_page_config(page_title=_NE_PAGE_TITLE, layout="wide")
-_inject_ne_theme()
+# Auth antes do tema pesado: na tela de login não injeta _inject_ne_theme (menos FOUC / conflito de CSS).
 _ne_ensure_dashboard_auth()
-with st.sidebar:
-    if st.session_state.get("ne_auth_ok"):
-        if st.button("Sair da sessão", key="ne_logout_btn", help="Encerra o login neste navegador."):
-            st.session_state.pop("ne_auth_ok", None)
-            st.rerun()
-raw_cfg = ne.load_config()
-_run_pending_ne_fetch(raw_cfg)
+# Links antigos (?ne_codes=1): sincroniza sessão e dá rerun ANTES de pintar cabeçalho/abas/dados
+# (evita um frame com URL legada + layout principal visível).
 _ne_qp_ticket = _query_param_first("ne_ticket")
 _ne_qp_codes = _query_param_first("ne_codes")
 _ne_open_codes_panel = str(_ne_qp_codes or "").strip().lower() in ("1", "true", "yes")
-# Links antigos (?ne_codes=1): copia para sessão e limpa a URL (evita recarregar página / perder login)
 if _ne_qp_ticket and _ne_open_codes_panel:
     st.session_state["ne_codes_ticket"] = _norm_ticket_id(_ne_qp_ticket)
     st.session_state["ne_codes_tab"] = _query_param_first("ne_tab") or "brasil"
@@ -3208,6 +3206,15 @@ if _ne_qp_ticket and _ne_open_codes_panel:
         if _qk in st.query_params:
             del st.query_params[_qk]
     st.rerun()
+
+_inject_ne_theme()
+with st.sidebar:
+    if st.session_state.get("ne_auth_ok"):
+        if st.button("Sair da sessão", key="ne_logout_btn", help="Encerra o login neste navegador."):
+            st.session_state.pop("ne_auth_ok", None)
+            st.rerun()
+raw_cfg = ne.load_config()
+_run_pending_ne_fetch(raw_cfg)
 
 _ne_codes_tid = st.session_state.get("ne_codes_ticket")
 _ne_codes_tab = st.session_state.get("ne_codes_tab")
