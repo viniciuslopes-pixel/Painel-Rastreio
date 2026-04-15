@@ -455,6 +455,88 @@ def _long_df_tracking_status_by_ticket(df: pd.DataFrame, top_n: int) -> tuple[pd
     return pd.DataFrame(rows), ticket_order
 
 
+def _tracking_json_loose_dict_segments(root: object) -> list[dict]:
+    """Varre JSON aninhado e devolve dicts que parecem segmento de rastreio (último recurso após parse estrito)."""
+    acc: list[dict] = []
+    seen: set[int] = set()
+    stack: list[object] = [root]
+
+    def _hints_match(d: dict) -> bool:
+        if not d:
+            return False
+        parts: list[str] = [str(k).lower() for k in d.keys()]
+        for v in d.values():
+            if isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                parts.append(str(v).lower()[:400])
+        blob = " ".join(parts)[:4000]
+        needles = (
+            "track",
+            "codigo",
+            "code",
+            "carrier",
+            "correo",
+            "andreani",
+            "epick",
+            "rastreio",
+            "created",
+            "finaliz",
+            "completed",
+            "shipment",
+            "label",
+            "package",
+            "envio",
+            "numero",
+            "courier",
+            "operadora",
+        )
+        return any(n in blob for n in needles)
+
+    while stack and len(acc) < 400:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            cid = id(cur)
+            if cid in seen:
+                continue
+            seen.add(cid)
+            if _hints_match(cur):
+                acc.append(cur)
+                continue
+            for v in cur.values():
+                stack.append(v)
+        elif isinstance(cur, list):
+            for v in reversed(cur):
+                stack.append(v)
+        elif isinstance(cur, str):
+            t = cur.strip()
+            if (t.startswith("{") and t.endswith("}")) or (t.startswith("[") and t.endswith("]")):
+                try:
+                    stack.append(json.loads(t))
+                except json.JSONDecodeError:
+                    pass
+    return acc
+
+
+def _ar_format_preview_payload(raw: object, *, max_chars: int = 24000) -> str:
+    """Texto legível do campo de tracking para fallback (coluna Status na tabela)."""
+    cap = max(500, min(int(max_chars), 100000))
+    try:
+        if isinstance(raw, (dict, list)):
+            return json.dumps(raw, ensure_ascii=False, indent=2)[:cap]
+    except (TypeError, ValueError):
+        pass
+    s = str(raw).strip()
+    if not s:
+        return ""
+    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+        try:
+            o = json.loads(s)
+            if isinstance(o, (dict, list)):
+                return json.dumps(o, ensure_ascii=False, indent=2)[:cap]
+        except json.JSONDecodeError:
+            pass
+    return s[:cap]
+
+
 def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
     """Segmentos/códigos serializados no custom field (JSON no Zendesk).
 
@@ -575,19 +657,30 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
         pass
 
     if isinstance(raw, dict):
-        return _finalize_root(raw)
+        a = _finalize_root(raw)
+        return a if a else _tracking_json_loose_dict_segments(raw)
 
     if isinstance(raw, (list, tuple)):
-        return _finalize_root(list(raw))
+        lst = list(raw)
+        a = _finalize_root(lst)
+        return a if a else _tracking_json_loose_dict_segments(lst)
 
     s = str(raw).strip()
     if not s or s.lower() in ("{}", "null", "none", "nan", "[]"):
         return []
+    if len(s) >= 2 and s[0] == s[-1] == '"':
+        try:
+            inner = json.loads(s)
+            if isinstance(inner, str):
+                s = inner.strip()
+        except json.JSONDecodeError:
+            pass
     try:
         parsed: object = json.loads(s)
     except json.JSONDecodeError:
         return []
-    return _finalize_root(parsed)
+    a = _finalize_root(parsed)
+    return a if a else _tracking_json_loose_dict_segments(parsed)
 
 
 def _tracking_display_code(it: dict) -> str:
@@ -1122,6 +1215,30 @@ def flatten_tracking_numbers_data_detail(
             display_code = code if code else f"(sem código #{i})"
             raw_map = _lookup_status_rastreamento_value(ex, nx, code)
             _append_row(i, display_code, it, raw_map)
+
+    if not rows and for_argentina_tab and _ar_raw_tracking_field_nonempty(tracking_raw):
+        blob = _ar_format_preview_payload(tracking_raw, max_chars=12000).strip()
+        if blob:
+            if len(blob) >= 11900:
+                blob = blob[:11900] + "\n… (truncado para a tabela; ver campo no Zendesk)"
+            rows.append(
+                {
+                    "ticket_id": tid,
+                    "encomenda_n": 1,
+                    "codigo_rastreio": "(JSON bruto — app AR)",
+                    "transportadora": "—",
+                    "transportadora_ar": "—",
+                    "created_at": "—",
+                    "finalizado_em": "—",
+                    "duracion_app": "—",
+                    "ttr_horas": None,
+                    "situacao": "Em aberto",
+                    "status_operacional": "",
+                    "status_zendesk": blob,
+                    "guru": "—",
+                    "ttr_formatado": "—",
+                }
+            )
 
     return pd.DataFrame(rows)
 
