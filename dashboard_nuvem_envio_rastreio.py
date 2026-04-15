@@ -477,6 +477,7 @@ def _tracking_json_loose_dict_segments(root: object) -> list[dict]:
             "correo",
             "andreani",
             "epick",
+            "epik",
             "rastreio",
             "created",
             "finaliz",
@@ -499,6 +500,14 @@ def _tracking_json_loose_dict_segments(root: object) -> list[dict]:
                 continue
             seen.add(cid)
             if _hints_match(cur):
+                if cur and all(isinstance(v, list) for v in cur.values()):
+                    flat = [x for v in cur.values() if isinstance(v, list) for x in v]
+                    if flat and all(isinstance(x, dict) for x in flat):
+                        for v in reversed(list(cur.values())):
+                            if isinstance(v, list):
+                                for x in reversed(v):
+                                    stack.append(x)
+                        continue
                 acc.append(cur)
                 continue
             for v in cur.values():
@@ -592,6 +601,13 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
                             return inner
                         if isinstance(inner, dict):
                             return _coerce_list(inner)
+            # App AR [Envio Nube]: { "correo": [...], "andreani": [...], "epik": [...] } — só listas de objetos.
+            if obj and all(isinstance(v, list) for v in obj.values()):
+                merged: list[object] = []
+                for v in obj.values():
+                    merged.extend(v)
+                if merged and all(isinstance(x, dict) for x in merged):
+                    return merged
             if any(
                 k in obj
                 for k in (
@@ -810,7 +826,7 @@ def _ar_canonical_carrier(raw: object) -> str:
         return _AR_CARRIER_OTHER
     if "andreani" in s:
         return "Andreani"
-    if "e-pick" in s or "epick" in s or s == "e pick":
+    if "e-pick" in s or "epick" in s or "epik" in s or s == "e pick":
         return "E-pick"
     if "correo" in s or "correios" in s:
         return "Correo Argentino"
@@ -1175,6 +1191,7 @@ def flatten_tracking_numbers_data_detail(
         car_disp = car_raw if car_raw else "—"
         car_ar = _ar_canonical_carrier(car_raw)
         dtxt = _tracking_app_duracion_text(itd) if has_segment else ""
+        ttr_fmt = dtxt if dtxt else _format_ttr_hours_compact(ttr)
         rows.append(
             {
                 "ticket_id": tid,
@@ -1190,7 +1207,7 @@ def flatten_tracking_numbers_data_detail(
                 "status_operacional": op_label,
                 "status_zendesk": raw_z,
                 "guru": guru,
-                "ttr_formatado": _format_ttr_hours_compact(ttr),
+                "ttr_formatado": ttr_fmt,
             }
         )
 
