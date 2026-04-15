@@ -1009,6 +1009,52 @@ def flatten_tracking_numbers_data_detail(
     return pd.DataFrame(rows)
 
 
+_NE_TBL_DASH = "-"
+
+
+def _ne_dash_cell(val: object) -> str:
+    """Texto para células da tabela: traço quando não há informação."""
+    if val is None:
+        return _NE_TBL_DASH
+    try:
+        if pd.api.types.is_scalar(val) and pd.isna(val):
+            return _NE_TBL_DASH
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    if not s or s in ("—", "–", "None", "nan", "NaN"):
+        return _NE_TBL_DASH
+    return s
+
+
+def _detail_df_fallback_lines(ticket_id: str, n_lines: int) -> pd.DataFrame:
+    """Linhas com '-' quando não há JSON parseável; `n_lines` vem de `total_qtd_rastreio` (mín. 1)."""
+    tid = _norm_ticket_id(ticket_id)
+    n = max(1, min(int(n_lines), 500))
+    rows: list[dict[str, object]] = []
+    for i in range(1, n + 1):
+        code = f"{_NE_TBL_DASH} ({i}/{n})" if n > 1 else _NE_TBL_DASH
+        rows.append(
+            {
+                "ticket_id": tid,
+                "encomenda_n": i,
+                "codigo_rastreio": code,
+                "transportadora": _NE_TBL_DASH,
+                "transportadora_ar": _AR_CARRIER_OTHER,
+                "created_at": _NE_TBL_DASH,
+                "finalizado_em": _NE_TBL_DASH,
+                "duracion_app": _NE_TBL_DASH,
+                "ttr_horas": None,
+                "situacao": _NE_TBL_DASH,
+                "status_operacional": _NE_TBL_DASH,
+                "status_zendesk": "",
+                "guru": _NE_TBL_DASH,
+                "ttr_formatado": _NE_TBL_DASH,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def _app_tracking_ttr_stats(df: pd.DataFrame) -> tuple[pd.Series, int, int]:
     """(série horas TTR só concluídos, total de códigos no JSON, quantidade com TTR válido)."""
     if "tracking_numbers_data" not in df.columns:
@@ -1326,13 +1372,23 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
     _tr_raw = row.get("tracking_numbers_data") if "tracking_numbers_data" in row.index else None
     _st_raw = row.get("status_rastreamento") if "status_rastreamento" in row.index else None
     detail_df = flatten_tracking_numbers_data_detail(_tr_raw, tid, _st_raw)
+    _n_fallback = 0
+    if "total_qtd_rastreio" in row.index:
+        try:
+            _n_fallback = int(pd.to_numeric(row.get("total_qtd_rastreio"), errors="coerce") or 0)
+        except (TypeError, ValueError):
+            _n_fallback = 0
     if detail_df.empty:
-        st.info(
-            "Não há linhas para exibir: **status_rastreamento** vazio ou inválido (esperado: objeto "
-            "JSON **código de rastreio → status**) e **tracking_numbers_data** sem itens reconhecidos. "
-            "Com só o Zendesk preenchido, o painel usa as **chaves** de `status_rastreamento` como códigos."
+        detail_df = _detail_df_fallback_lines(tid, _n_fallback if _n_fallback > 0 else 1)
+        st.caption(
+            "Não foi possível ler **tracking_numbers_data** / **status_rastreamento**: "
+            "a tabela abaixo usa **-** nos campos sem dado. "
+            + (
+                f"Quantidade de linhas alinhada a **total_qtd_rastreio** ({_n_fallback})."
+                if _n_fallback > 0
+                else "Uma linha única com traços (sem total no recorte)."
+            )
         )
-        return
 
     _cand = _ticket_ids_with_tracking(df)
     if len(_cand) > 1:
@@ -1354,28 +1410,30 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
             st.session_state["_ne_sync_pick_widget"] = tab
             st.rerun()
 
-    with st.expander("Tabela detalhada (código, status, guru, TTR)", expanded=True):
-        _disp = detail_df[
-            [
-                "codigo_rastreio",
-                "status_zendesk",
-                "status_operacional",
-                "guru",
-                "ttr_formatado",
-                "transportadora",
-            ]
-        ].rename(
-            columns={
-                "codigo_rastreio": "Código de rastreio",
-                "status_zendesk": "Status (campo Zendesk)",
-                "status_operacional": "Status (agrupado)",
-                "guru": "Guru responsável",
-                "ttr_formatado": "TTR",
-                "transportadora": "Transportadora",
+    with st.expander("Tabela: código, guru, TTR, transportadora, status", expanded=True):
+        _status_cells: list[str] = []
+        for _z, _o in zip(
+            detail_df["status_zendesk"].tolist(),
+            detail_df["status_operacional"].tolist(),
+        ):
+            _zs = _ne_dash_cell(_z)
+            _os = _ne_dash_cell(_o)
+            if _zs == _NE_TBL_DASH and _os == _NE_TBL_DASH:
+                _status_cells.append(_NE_TBL_DASH)
+            elif _zs == _NE_TBL_DASH:
+                _status_cells.append(_os)
+            elif _os == _NE_TBL_DASH or _zs == _os:
+                _status_cells.append(_zs)
+            else:
+                _status_cells.append(f"{_zs} | {_os}")
+        _disp = pd.DataFrame(
+            {
+                "Código": detail_df["codigo_rastreio"].map(_ne_dash_cell),
+                "Guru": detail_df["guru"].map(_ne_dash_cell),
+                "TTR": detail_df["ttr_formatado"].map(_ne_dash_cell),
+                "Transportadora": detail_df["transportadora"].map(_ne_dash_cell),
+                "Status": _status_cells,
             }
-        )
-        _status_opts = sorted(
-            set(_TRACKING_STATUS_ORDER) | {str(x) for x in _disp["Status (agrupado)"].dropna().unique()}
         )
         st.dataframe(
             _disp,
@@ -1383,27 +1441,29 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
             hide_index=True,
             disabled=True,
             column_config={
-                "Código de rastreio": st.column_config.TextColumn(
-                    "Código de rastreio", width="large"
-                ),
-                "Status (campo Zendesk)": st.column_config.TextColumn(
-                    "Valor em status_rastreamento", width="medium"
-                ),
-                "Status (agrupado)": st.column_config.SelectColumn(
-                    "Status (agrupado)",
-                    options=_status_opts,
-                    required=False,
-                ),
-                "Guru responsável": st.column_config.TextColumn("Guru (agentName)", width="medium"),
+                "Código": st.column_config.TextColumn("Código", width="large"),
+                "Guru": st.column_config.TextColumn("Guru", width="medium"),
                 "TTR": st.column_config.TextColumn(
                     "TTR",
-                    help="Tempo até resolução quando há início e fim válidos no JSON.",
+                    help="Tempo até resolução quando há datas no JSON de rastreio.",
                 ),
-                "Transportadora": st.column_config.TextColumn("Transportadora", width="small"),
+                "Transportadora": st.column_config.TextColumn("Transportadora", width="medium"),
+                "Status": st.column_config.TextColumn(
+                    "Status",
+                    help="Valor do Zendesk e/ou categoria agrupada.",
+                    width="large",
+                ),
             },
         )
 
     plot_df = detail_df.copy()
+    for _c in ("guru", "transportadora", "ttr_formatado", "status_operacional", "status_zendesk", "codigo_rastreio"):
+        if _c in plot_df.columns:
+            plot_df[_c] = (
+                plot_df[_c]
+                .astype(str)
+                .replace({"nan": _NE_TBL_DASH, "None": _NE_TBL_DASH, "": _NE_TBL_DASH, "—": _NE_TBL_DASH})
+            )
     plot_df["codigo_full"] = plot_df["codigo_rastreio"].astype(str)
     plot_df["codigo"] = plot_df["codigo_full"].str.slice(0, 72)
     plot_df["n"] = plot_df["encomenda_n"]
