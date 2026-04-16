@@ -381,19 +381,11 @@ def build_sql(
     tracking_filter_sql = ""
     if only_with_tracking_filled and extra_cols:
         if data_model == DATA_MODEL_AR and "tracking_numbers_data" in logical_set:
-            _trk_ok = f"""(
-      ({_trk_src_sql}) IS NOT NULL
-      AND TRIM(CAST(({_trk_src_sql}) AS STRING)) NOT IN ('', '{{}}', 'null', '[]')
-    )"""
-            if _tid_force:
-                _ids_trk = ", ".join(
-                    f"'{_sql_escape(x)}'" for x in _tid_force
-                )
-                tracking_filter_sql = (
-                    f"  AND ({_trk_ok}\n    OR CAST(t.id AS STRING) IN ({_ids_trk}))\n"
-                )
-            else:
-                tracking_filter_sql = f"  AND {_trk_ok}\n"
+            # Não filtrar rastreio na SQL: o total AR usa JSON objeto (carrier → lista), mas a
+            # expressão legada aqui é ARRAY<STRING> — zera e some o ticket antes do fetch.
+            # O corte "só com rastreio" fica em ``fetch_dataframe`` com
+            # ``_ar_segment_count_from_tracking_raw`` (igual ao total exibido).
+            pass
         else:
             qty_checks = [
                 f"COALESCE(TRY_CAST(p.{f} AS INT), 0) > 0"
@@ -709,6 +701,12 @@ def fetch_dataframe(
         # Só contagens reais do JSON (campo `code`); não inflar com total da SQL.
         df["total_qtd_rastreio"] = parsed.fillna(0).astype(int)
         df = df.sort_values("total_qtd_rastreio", ascending=False).reset_index(drop=True)
+        if only_track:
+            allow = set(_ticket_ids_from_env_and_temp_ar(DATA_MODEL_AR, cfg))
+            if "ticket_id" in df.columns:
+                tid = _normalize_ticket_id_series(df["ticket_id"])
+                keep = (df["total_qtd_rastreio"] > 0) | tid.isin(allow)
+                df = df.loc[keep].copy().reset_index(drop=True)
     if str(cfg.get("data_model") or "").strip() == DATA_MODEL_AR and not df.empty:
         df = _enforce_ar_tab_row_filter(df, cfg)
     return df
