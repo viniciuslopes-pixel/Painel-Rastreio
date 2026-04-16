@@ -507,12 +507,52 @@ WHERE {ticket_date_predicate}
 """
 
 
+def _ar_item_has_shipment_code(item: object) -> bool:
+    """True se o objeto de segmento tem código de rastreio utilizável (alinha ao dashboard).
+
+    Com chave ``code`` no dict (app AR), só conta se ``code`` for texto não vazio — ``id`` não entra.
+    Sem ``code``, usa os mesmos fallbacks que o painel, exceto ``id``.
+    """
+    if not isinstance(item, dict):
+        return False
+    if "code" in item:
+        v = item.get("code")
+        if v is None:
+            return False
+        try:
+            if pd.api.types.is_scalar(v) and pd.isna(v):
+                return False
+        except (TypeError, ValueError):
+            pass
+        t = str(v).strip()
+        return bool(t) and t.lower() not in ("null", "none", "nan")
+    for key in (
+        "trackingNumber",
+        "tracking_number",
+        "trackingCode",
+        "codigo",
+        "numero_rastreio",
+        "numeroRastreio",
+        "rastreio",
+    ):
+        v = item.get(key)
+        if v is None:
+            continue
+        try:
+            if pd.api.types.is_scalar(v) and pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        t = str(v).strip()
+        if t and t.lower() not in ("null", "none", "nan"):
+            return True
+    return False
+
+
 def _ar_segment_count_from_tracking_raw(val: object) -> int:
-    """Conta segmentos no JSON do app AR.
+    """Conta só segmentos com código de rastreio (ex.: ``code`` preenchido); ignora ``id`` e linhas só consulta sem código.
 
     A SQL usa ``ARRAY<STRING>``; o payload real costuma ser ``{ "correo": [...], ... }``.
-    Sem este pós-processamento, ``COALESCE(..., 1)`` na query fazia **todo** ticket não-array
-    aparecer com total **1** na amostra e no ``total_qtd_rastreio``.
     """
     if val is None:
         return 0
@@ -533,12 +573,23 @@ def _ar_segment_count_from_tracking_raw(val: object) -> int:
             val = val.item()
     except ImportError:
         pass
+
+    def _count_dict_of_lists(d: dict) -> int:
+        n = 0
+        for v in d.values():
+            if not isinstance(v, list):
+                continue
+            for it in v:
+                if _ar_item_has_shipment_code(it):
+                    n += 1
+        return n
+
     if isinstance(val, dict):
         if val and all(isinstance(v, list) for v in val.values()):
-            return int(sum(len(v) for v in val.values() if isinstance(v, list)))
-        return 1 if val else 0
+            return _count_dict_of_lists(val)
+        return 1 if _ar_item_has_shipment_code(val) else 0
     if isinstance(val, list):
-        return len(val)
+        return sum(1 for it in val if _ar_item_has_shipment_code(it))
     s = str(val).strip()
     if not s or s.lower() in ("{}", "[]", "null", "none", "nan"):
         return 0
@@ -548,10 +599,10 @@ def _ar_segment_count_from_tracking_raw(val: object) -> int:
         return 0
     if isinstance(o, dict):
         if o and all(isinstance(v, list) for v in o.values()):
-            return int(sum(len(v) for v in o.values() if isinstance(v, list)))
-        return 1 if o else 0
+            return _count_dict_of_lists(o)
+        return 1 if _ar_item_has_shipment_code(o) else 0
     if isinstance(o, list):
-        return len(o)
+        return sum(1 for it in o if _ar_item_has_shipment_code(it))
     return 0
 
 

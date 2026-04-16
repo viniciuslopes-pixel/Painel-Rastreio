@@ -11,7 +11,7 @@ Antes: preencha zendesk_field_ids em nuvem_envio_rastreio_config.json
 (use sql_descobrir_campos_rastreio.sql no Databricks para achar os IDs).
 Abas **Brasil** e **Argentina** em nuvem_envio_rastreio_config.json → `tabs`.
 Brasil: três transportadoras + status por ticket. Argentina: [AR] Envio Nube, volume e tempo por envio.
-Detalhe por ticket: gráfico de status, seletor na aba ou ?ne_codes=1 — tabela achatada (tracking_numbers_data) com TTR e status. Amostra: ?ne_ticket= + ne_tab.
+Detalhe por ticket: gráfico de status, seletor na aba ou ?ne_codes=1 — tabela achatada (**tracking_numbers_data**; cada linha = **code**; **id** interno não conta). Amostra: ?ne_ticket= + ne_tab.
 """
 from __future__ import annotations
 
@@ -629,7 +629,7 @@ def _tracking_status_buckets_for_row(row: pd.Series) -> dict[str, float]:
 
 
 def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
-    """Argentina: uma fatia por segmento em `tracking_numbers_data`, classificando pelo `status` do app."""
+    """Argentina: uma fatia por segmento **com código de rastreio** (`code`), classificando pelo `status` do app."""
     if "tracking_numbers_data" not in row.index:
         return _tracking_status_buckets_for_row(row)
     items = _parse_tracking_numbers_app_json(row.get("tracking_numbers_data"))
@@ -815,7 +815,9 @@ def _ar_format_preview_payload(raw: object, *, max_chars: int = 24000) -> str:
 def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
     """Segmentos/códigos serializados no custom field (JSON no Zendesk).
 
-    **Modelo Argentina ([AR] Envio Nube):** app grava `createdAt`, `finalizadoAt`, `duracion`, etc.
+    **Modelo Argentina ([AR] Envio Nube):** objeto por transportadora com ``code`` (rastreio),
+    ``id`` (só identificação interna — **não** conta nem aparece como código), ``carrier``, ``status``, etc.
+    Segmentos sem ``code`` preenchido (ex.: só “Solo consulta”) são **omitidos** de contagens e tabelas.
 
     Aceita: lista de objetos; lista de strings JSON; objeto com `cards`/`items`/etc.;
     objeto único com `createdAt` e término (`finalizadoAt` ou `completedAt`).
@@ -823,6 +825,14 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
     O conector Databricks/pandas pode devolver **list** ou **dict** já desserializados;
     nesse caso não usar ``json.loads(str(raw))`` (o ``str`` de uma lista usa aspas simples e quebra o JSON).
     """
+
+    def _keep_with_shipment_code(segments: list[dict]) -> list[dict]:
+        """Só segmentos com código de rastreio utilizável (regra em ``_tracking_display_code``)."""
+        return [
+            d
+            for d in segments
+            if isinstance(d, dict) and bool(str(_tracking_display_code(d) or "").strip())
+        ]
 
     def _coerce_list(obj: object) -> list[object]:
         if isinstance(obj, list):
@@ -940,12 +950,16 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
 
     if isinstance(raw, dict):
         a = _finalize_root(raw)
-        return a if a else _tracking_json_loose_dict_segments(raw)
+        return _keep_with_shipment_code(a) if a else _keep_with_shipment_code(
+            _tracking_json_loose_dict_segments(raw)
+        )
 
     if isinstance(raw, (list, tuple)):
         lst = list(raw)
         a = _finalize_root(lst)
-        return a if a else _tracking_json_loose_dict_segments(lst)
+        return _keep_with_shipment_code(a) if a else _keep_with_shipment_code(
+            _tracking_json_loose_dict_segments(lst)
+        )
 
     s = str(raw).strip()
     if not s or s.lower() in ("{}", "null", "none", "nan", "[]"):
@@ -962,20 +976,41 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
     except json.JSONDecodeError:
         return []
     a = _finalize_root(parsed)
-    return a if a else _tracking_json_loose_dict_segments(parsed)
+    return _keep_with_shipment_code(a) if a else _keep_with_shipment_code(
+        _tracking_json_loose_dict_segments(parsed)
+    )
 
 
 def _tracking_display_code(it: dict) -> str:
+    """Código de rastreio exibido e usado em contagens.
+
+    **App AR ([AR] Envio Nube):** o rastreio é sempre o campo ``code``. A chave ``id`` é só
+    identificador interno do formulário — **nunca** deve aparecer como código nem contar como envio.
+    Se a chave ``code`` existir no objeto (mesmo vazia), não faz fallback para outras chaves.
+    """
+    if not isinstance(it, dict):
+        return ""
+    if "code" in it:
+        v = it.get("code")
+        if v is None:
+            return ""
+        try:
+            if pd.api.types.is_scalar(v) and pd.isna(v):
+                return ""
+        except (TypeError, ValueError):
+            pass
+        t = str(v).strip()
+        if t and t.lower() not in ("null", "none", "nan"):
+            return t
+        return ""
     for key in (
         "trackingNumber",
         "tracking_number",
         "trackingCode",
-        "code",
         "codigo",
         "numero_rastreio",
         "numeroRastreio",
         "rastreio",
-        "id",
     ):
         v = it.get(key)
         if v is None:
@@ -1131,7 +1166,7 @@ def _ar_raw_tracking_field_nonempty(raw: object) -> bool:
 
 
 def _ar_codes_per_row_for_metrics(r: pd.Series) -> int:
-    """Códigos por ticket: parse JSON → total SQL → 1 se o campo tracking vier preenchido (ticket passou no filtro)."""
+    """Códigos por ticket: só segmentos com ``code``/rastreio preenchido; depois alinha com ``total_qtd_rastreio`` (SQL)."""
     n = 0
     if "tracking_numbers_data" in r.index:
         n = len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data")))
@@ -1139,10 +1174,6 @@ def _ar_codes_per_row_for_metrics(r: pd.Series) -> int:
         v = pd.to_numeric(r.get("total_qtd_rastreio"), errors="coerce")
         if pd.notna(v):
             n = max(0, int(v))
-    if n == 0 and "tracking_numbers_data" in r.index and _ar_raw_tracking_field_nonempty(
-        r.get("tracking_numbers_data")
-    ):
-        n = 1
     return n
 
 
@@ -1214,6 +1245,8 @@ def _ne_filter_df_ar_carriers(df: pd.DataFrame, selected: list[str]) -> pd.DataF
         if not items:
             return _AR_CARRIER_OTHER in sel
         for it in items:
+            if not str(_tracking_display_code(it) or "").strip():
+                continue
             if _ar_canonical_carrier(_tracking_display_carrier(it)) in sel:
                 return True
         return False
@@ -1466,17 +1499,21 @@ def flatten_tracking_numbers_data_detail(
         next_i = len(rows) + 1
         for it in items:
             code = _tracking_display_code(it) or ""
-            if code and _norm_tracking_code_key(code) in emitted_norm:
+            if not code:
                 continue
-            dc = code if code else f"(sem código #{next_i})"
-            _append_row(next_i, dc, it, None)
+            if _norm_tracking_code_key(code) in emitted_norm:
+                continue
+            _append_row(next_i, code, it, None)
             next_i += 1
     else:
-        for i, it in enumerate(items, start=1):
+        idx = 0
+        for it in items:
             code = _tracking_display_code(it) or ""
-            display_code = code if code else f"(sem código #{i})"
+            if not code:
+                continue
+            idx += 1
             raw_map = _lookup_status_rastreamento_value(ex, nx, code)
-            _append_row(i, display_code, it, raw_map)
+            _append_row(idx, code, it, raw_map)
 
     if not rows and for_argentina_tab and _ar_raw_tracking_field_nonempty(tracking_raw):
         blob = _ar_format_preview_payload(tracking_raw, max_chars=12000).strip()
@@ -2926,10 +2963,11 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
         c2.metric(
             "Tracking Numbers",
             _tn_loaded if len(df_loaded) else "—",
-            help="Soma de códigos por ticket: **parse** de **tracking_numbers_data**; se 0, **total_qtd_rastreio** (SQL); "
-            "se ainda 0, **1** se o campo tracking não estiver vazio. "
-            "Se a consulta foi com **só com rastreio**, cada ticket entra com **no mínimo 1** (alinha ao card Tickets quando há ticket forçado ou JSON vazio no parse). "
-            "Cards por operadora somam só o que o parse classifica (podem ser menores). "
+            help="Soma de **códigos de rastreio** (`code` preenchido no JSON do app AR; `id` não conta). "
+            "Parse de **tracking_numbers_data**; se o parse der 0, usa **total_qtd_rastreio** (SQL). "
+            "Se a consulta foi com **só com rastreio**, cada ticket entra com **no mínimo 1** no somatório do card "
+            "(alinha ao filtro quando há ticket forçado). "
+            "Cards por operadora somam só segmentos com código. "
             f"Na amostra filtrada por transportadora: **{_tn_visible}**.",
         )
         c3.metric(
@@ -2939,7 +2977,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             )
             if len(df_loaded)
             else "—",
-            help="Maior número de códigos num único ticket (parse / SQL / mínimo 1 com filtro só rastreio).",
+            help="Maior número de códigos (`code` / rastreio) num único ticket: parse, depois **total_qtd_rastreio** se precisar; "
+            "com filtro **só com rastreio**, no mínimo 1 por ticket no somatório.",
         )
         c4.metric("Correo Argentino", _ar_vol_label("Correo Argentino"))
         c5.metric("Andreani", _ar_vol_label("Andreani"))
@@ -2983,15 +3022,15 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 "Cada linha é um ticket. A barra mostra **quantos códigos de rastreio** há em cada tipo de situação "
                 "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**. "
                 + (
-                    "**Argentina:** cada segmento em **tracking_numbers_data** (ex.: listas `correo` / `andreani` / `epik`) "
-                    "entra na contagem; a cor vem do **status** do app (PT/ES). O excedente de **total_qtd_rastreio** sobre o parse "
+                    "**Argentina:** cada segmento com **code** de rastreio preenchido (listas `correo` / `andreani` / `epik`); "
+                    "**id** interno não conta. A cor vem do **status** do app (PT/ES). O excedente de **total_qtd_rastreio** sobre o parse "
                     "aparece em **Só no total geral**. "
                     if is_ar
                     else "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status**; "
                     "a largura usa o total de códigos quando existir, senão **1** só para o ticket aparecer no eixo (não significa “1 código” real). "
                 )
                 + "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
-                "cada código em **tracking_numbers_data** e o **agente** (**agentName**)."
+                "cada **code** em **tracking_numbers_data** e o **agente** (**agentName**)."
             )
             _top_status = st.number_input(
                 "Quantidade de tickets neste gráfico",
@@ -3098,9 +3137,9 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
     if is_ar:
         st.subheader("Volume por transportadora (Argentina)")
         st.caption(
-            "Mostra **quantos códigos** há em **tracking_numbers_data** para **Correo Argentino**, **Andreani** e **E-pick** "
-            "na amostra **filtrada** (o card **Tracking Numbers** acima soma toda a consulta). "
-            "A barra inteira é o total; cada cor é uma transportadora."
+            "Conta só objetos com **code** de rastreio preenchido (entradas só “Solo consulta” sem código não entram). "
+            "**Correo Argentino**, **Andreani** e **E-pick** na amostra **filtrada** "
+            "(o card **Tracking Numbers** acima soma toda a consulta). A barra inteira é o total; cada cor é uma transportadora."
         )
         _ar_logo_files = {
             "Correo Argentino": "correo_argentino.png",
