@@ -637,8 +637,12 @@ def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
         return _tracking_status_buckets_for_row(row)
     cres = cpnd = csolo = cabt = csem = cout = 0
     for it in items:
-        stxt = _tracking_item_inline_status_raw(it)
-        cat = _normalize_tracking_status_value(stxt) if stxt else "sem_status"
+        cat = _tracking_segment_status_category(
+            it,
+            None,
+            ar_app_segment=True,
+            prefer_app_status_over_zendesk=True,
+        )
         if cat == "resolvido":
             cres += 1
         elif cat == "pendente":
@@ -1085,8 +1089,25 @@ def _tracking_segment_end_timestamp(it: dict) -> object | None:
 
 
 def _tracking_app_duracion_text(it: dict) -> str:
-    for key in ("duracion", "duración", "duration"):
+    if not isinstance(it, dict):
+        return ""
+    for key in ("duracion", "duración", "duration", "Duracion", "Duración"):
         v = it.get(key)
+        if v is None:
+            continue
+        try:
+            if pd.api.types.is_scalar(v) and pd.isna(v):
+                continue
+        except (TypeError, ValueError):
+            pass
+        t = str(v).strip()
+        if t:
+            return t
+    dur_keys = {"duracion", "duración", "duration"}
+    for k, v in it.items():
+        lk = str(k).strip().lower()
+        if lk not in dur_keys:
+            continue
         if v is None:
             continue
         try:
@@ -1367,18 +1388,39 @@ def _format_ttr_hours_compact(hours: float | None) -> str:
     return " ".join(parts)
 
 
-def _tracking_item_inline_status_raw(it: dict) -> str:
-    """Status textual vindo do próprio objeto do app (se existir)."""
-    for key in (
-        "status",
-        "estado",
-        "state",
-        "trackingStatus",
-        "tracking_status",
-        "situation",
-        "situacion",
-        "situacao",
-    ):
+def _tracking_item_inline_status_raw(it: dict, *, ar_app_segment: bool = False) -> str:
+    """Status textual vindo do próprio objeto do app (se existir).
+
+    **Argentina (`ar_app_segment=True`):** não usa `situation` / `situacion` / `situacao` — no app
+    [AR] Envio Nube esses campos costumam refletir etapa de formulário (ex.: “Solo consulta”) enquanto
+    o estado do envio está em ``status`` (ex.: ``Finalizado``). Ler ``situacao`` primeiro quebra
+    tabela e gráfico quando ``status`` vem vazio no warehouse ou em cópias parciais do JSON.
+    """
+    if not isinstance(it, dict):
+        return ""
+    if ar_app_segment:
+        keys = (
+            "status",
+            "Status",
+            "estado",
+            "Estado",
+            "state",
+            "State",
+            "trackingStatus",
+            "tracking_status",
+        )
+    else:
+        keys = (
+            "status",
+            "estado",
+            "state",
+            "trackingStatus",
+            "tracking_status",
+            "situation",
+            "situacion",
+            "situacao",
+        )
+    for key in keys:
         v = it.get(key)
         if v is None:
             continue
@@ -1390,7 +1432,78 @@ def _tracking_item_inline_status_raw(it: dict) -> str:
         t = str(v).strip()
         if t and t.lower() not in ("null", "none", "nan", "{}"):
             return t
+    if ar_app_segment:
+        rank = {"status": 0, "trackingstatus": 1, "tracking_status": 2, "estado": 3, "state": 4}
+        best_r = 99
+        best_t = ""
+        for k, v in it.items():
+            lk = str(k).strip().lower().replace("-", "_")
+            r = rank.get(lk, 99)
+            if r == 99:
+                continue
+            if v is None:
+                continue
+            try:
+                if pd.api.types.is_scalar(v) and pd.isna(v):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            t = str(v).strip()
+            if not t or t.lower() in ("null", "none", "nan", "{}"):
+                continue
+            if r < best_r:
+                best_r = r
+                best_t = t
+        if best_t:
+            return best_t
     return ""
+
+
+def _tracking_segment_status_category(
+    it: dict | None,
+    raw_status_zendesk: str | None,
+    *,
+    ar_app_segment: bool = False,
+    prefer_app_status_over_zendesk: bool = False,
+) -> str:
+    """Categoria interna (chaves de ``_normalize_tracking_status_value`` + ``resolvido`` por TTR).
+
+    Usada na tabela de detalhe e no gráfico AR para não divergir: o mesmo segmento deve contar
+    na mesma fatia que aparece na linha do código.
+    """
+    itd = it if isinstance(it, dict) else {}
+    has_segment = bool(itd)
+    ca = (itd.get("createdAt") or itd.get("created_at")) if has_segment else None
+    co = _tracking_segment_end_timestamp(itd) if has_segment else None
+    ttr = _tracking_app_ttr_hours_resolved(ca, co)
+    cos = ""
+    if co is not None:
+        try:
+            if not (pd.api.types.is_scalar(co) and pd.isna(co)):
+                cos = str(co).strip()
+        except (TypeError, ValueError):
+            cos = str(co).strip()
+    if ttr is not None:
+        situacao = "Concluído"
+    elif not cos or cos.lower() in ("null", "none", "nan"):
+        situacao = "Em aberto"
+    else:
+        situacao = "Tempo não calculado"
+    raw_z = (raw_status_zendesk or "").strip()
+    raw_inline = (
+        _tracking_item_inline_status_raw(itd, ar_app_segment=ar_app_segment) if has_segment else ""
+    )
+    if prefer_app_status_over_zendesk:
+        raw_for = (raw_inline or raw_z).strip()
+    else:
+        raw_for = (raw_z or raw_inline).strip()
+    if raw_for:
+        return _normalize_tracking_status_value(raw_for)
+    if situacao == "Concluído":
+        return "resolvido"
+    if situacao == "Em aberto":
+        return "aberto"
+    return "sem_status"
 
 
 def flatten_tracking_numbers_data_detail(
@@ -1425,6 +1538,8 @@ def flatten_tracking_numbers_data_detail(
         display_code: str,
         it: dict | None,
         raw_status_zendesk: str | None,
+        *,
+        ar_detail_row: bool = False,
     ) -> None:
         itd = it if isinstance(it, dict) else {}
         has_segment = bool(itd)
@@ -1446,17 +1561,13 @@ def flatten_tracking_numbers_data_detail(
         else:
             situacao = "Tempo não calculado"
         raw_z = (raw_status_zendesk or "").strip()
-        raw_inline = _tracking_item_inline_status_raw(itd) if has_segment else ""
-        raw_for = raw_z or raw_inline
-        if raw_for:
-            cat = _normalize_tracking_status_value(raw_for)
-            op_label = _DETAIL_STATUS_INTERNAL_LABEL.get(cat, "Outros")
-        elif situacao == "Concluído":
-            op_label = "Resolvido"
-        elif situacao == "Em aberto":
-            op_label = "Aberto"
-        else:
-            op_label = "Sem informação de status"
+        cat = _tracking_segment_status_category(
+            it,
+            raw_status_zendesk,
+            ar_app_segment=ar_detail_row,
+            prefer_app_status_over_zendesk=ar_detail_row,
+        )
+        op_label = _DETAIL_STATUS_INTERNAL_LABEL.get(cat, "Outros")
         car_raw = _tracking_display_carrier(itd) if has_segment else ""
         car_disp = car_raw if car_raw else "—"
         car_ar = _ar_canonical_carrier(car_raw)
@@ -1505,7 +1616,7 @@ def flatten_tracking_numbers_data_detail(
                 continue
             idx += 1
             raw_map = _lookup_status_rastreamento_value(ex, nx, code)
-            _append_row(idx, code, it, raw_map)
+            _append_row(idx, code, it, raw_map, ar_detail_row=for_argentina_tab)
 
     if not rows and for_argentina_tab and _ar_raw_tracking_field_nonempty(tracking_raw):
         blob = _ar_format_preview_payload(tracking_raw, max_chars=12000).strip()
