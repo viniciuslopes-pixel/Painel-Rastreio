@@ -651,13 +651,7 @@ def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
             csem += 1
         else:
             cout += 1
-    n_seg = cres + cpnd + csolo + cabt + csem + cout
-    total_req = (
-        float(pd.to_numeric(row.get("total_qtd_rastreio"), errors="coerce") or 0.0)
-        if "total_qtd_rastreio" in row.index
-        else 0.0
-    )
-    extra = max(0.0, total_req - float(n_seg))
+    # AR: só o que existe no JSON com `code` — não há fatia “Só no total geral” (excedente SQL).
     return {
         "Resolvido": float(cres),
         "Pendente": float(cpnd),
@@ -665,7 +659,7 @@ def _tracking_status_buckets_for_row_ar(row: pd.Series) -> dict[str, float]:
         "Aberto": float(cabt),
         "Sem informação de status": float(csem),
         "Outros": float(cout),
-        "Só no total geral": extra,
+        "Só no total geral": 0.0,
     }
 
 
@@ -708,8 +702,11 @@ def _long_df_tracking_status_by_ticket(
                 wrote = True
         if not wrote:
             # Sem fatia > 0 o Altair não desenhava o ticket (parecia “só 4 tickets” com 55 carregados).
-            total_req = float(pd.to_numeric(row.get("total_qtd_rastreio"), errors="coerce") or 0)
-            q = max(total_req, 1.0)
+            if for_argentina_tab:
+                q = max(float(_ar_codes_per_row_for_metrics(row)), 1.0)
+            else:
+                total_req = float(pd.to_numeric(row.get("total_qtd_rastreio"), errors="coerce") or 0)
+                q = max(total_req, 1.0)
             rows.append(
                 {
                     "ticket_id": tid,
@@ -1166,15 +1163,10 @@ def _ar_raw_tracking_field_nonempty(raw: object) -> bool:
 
 
 def _ar_codes_per_row_for_metrics(r: pd.Series) -> int:
-    """Códigos por ticket: só segmentos com ``code``/rastreio preenchido; depois alinha com ``total_qtd_rastreio`` (SQL)."""
-    n = 0
-    if "tracking_numbers_data" in r.index:
-        n = len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data")))
-    if n == 0 and "total_qtd_rastreio" in r.index:
-        v = pd.to_numeric(r.get("total_qtd_rastreio"), errors="coerce")
-        if pd.notna(v):
-            n = max(0, int(v))
-    return n
+    """Códigos por ticket (AR): só segmentos com ``code``/rastreio preenchido — sem completar com SQL."""
+    if "tracking_numbers_data" not in r.index:
+        return 0
+    return len(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data")))
 
 
 def _ar_count_tracking_codes_in_frame(
@@ -1182,7 +1174,7 @@ def _ar_count_tracking_codes_in_frame(
     *,
     min_one_per_ticket_if_rastreio: bool = False,
 ) -> int:
-    """Soma de códigos na amostra (parse + fallbacks). Com filtro “só com rastreio”, cada linha conta no mínimo 1."""
+    """Soma de códigos na amostra (AR: só parse com `code`). Com filtro “só com rastreio”, cada linha conta no mínimo 1."""
     if frame is None or frame.empty:
         return 0
     per = [_ar_codes_per_row_for_metrics(r) for _, r in frame.iterrows()]
@@ -2964,7 +2956,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             "Tracking Numbers",
             _tn_loaded if len(df_loaded) else "—",
             help="Soma de **códigos de rastreio** (`code` preenchido no JSON do app AR; `id` não conta). "
-            "Parse de **tracking_numbers_data**; se o parse der 0, usa **total_qtd_rastreio** (SQL). "
+            "Só o parse de **tracking_numbers_data** (a coluna **total_qtd_rastreio** na amostra já vem igual a isso após o fetch). "
             "Se a consulta foi com **só com rastreio**, cada ticket entra com **no mínimo 1** no somatório do card "
             "(alinha ao filtro quando há ticket forçado). "
             "Cards por operadora somam só segmentos com código. "
@@ -2977,7 +2969,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             )
             if len(df_loaded)
             else "—",
-            help="Maior número de códigos (`code` / rastreio) num único ticket: parse, depois **total_qtd_rastreio** se precisar; "
+            help="Maior número de códigos (`code` / rastreio) num único ticket, só pelo JSON parseado; "
             "com filtro **só com rastreio**, no mínimo 1 por ticket no somatório.",
         )
         c4.metric("Correo Argentino", _ar_vol_label("Correo Argentino"))
@@ -3023,8 +3015,8 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 "(resolvido, pendente, etc.). Os tickets estão ordenados pelos que têm **mais códigos no total**. "
                 + (
                     "**Argentina:** cada segmento com **code** de rastreio preenchido (listas `correo` / `andreani` / `epik`); "
-                    "**id** interno não conta. A cor vem do **status** do app (PT/ES). O excedente de **total_qtd_rastreio** sobre o parse "
-                    "aparece em **Só no total geral**. "
+                    "**id** interno não conta. A cor vem do **status** do app (PT/ES). "
+                    "Não há fatia excedente: o total do gráfico é só o parse do JSON. "
                     if is_ar
                     else "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status**; "
                     "a largura usa o total de códigos quando existir, senão **1** só para o ticket aparecer no eixo (não significa “1 código” real). "

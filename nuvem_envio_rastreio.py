@@ -681,8 +681,9 @@ def fetch_dataframe(
         and not df.empty
     ):
         parsed = df["tracking_numbers_data"].map(_ar_segment_count_from_tracking_raw)
-        sql_t = pd.to_numeric(df["total_qtd_rastreio"], errors="coerce").fillna(0).astype(int)
-        df["total_qtd_rastreio"] = pd.concat([parsed, sql_t], axis=1).max(axis=1).astype(int)
+        # Só contagens reais do JSON (campo `code`); não inflar com total da SQL.
+        df["total_qtd_rastreio"] = parsed.fillna(0).astype(int)
+        df = df.sort_values("total_qtd_rastreio", ascending=False).reset_index(drop=True)
     if str(cfg.get("data_model") or "").strip() == DATA_MODEL_AR and not df.empty:
         df = _enforce_ar_tab_row_filter(df, cfg)
     return df
