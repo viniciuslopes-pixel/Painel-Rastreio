@@ -73,7 +73,17 @@ def _apply_streamlit_secrets_to_env() -> None:
         sec = st.secrets
     except Exception:
         return
-    for key in ("databricks_host", "databricks_http_path", "databricks_token"):
+    # Mesmas chaves que costumam ir no .env local; na Cloud ficam em Secrets e precisam em os.environ
+    # para funções que leem getenv (ex.: NE_INCLUIR_TICKET_IDS em build_sql / fetch).
+    for key in (
+        "databricks_host",
+        "databricks_http_path",
+        "databricks_token",
+        "NE_INCLUIR_TICKET_IDS",
+        "NE_FILTRO_GRUPO_EXTRA_ARGENTINA",
+        "NUVEM_CONFIG_JSON",
+        "NUVEM_DOTENV_PATH",
+    ):
         try:
             if key not in sec:
                 continue

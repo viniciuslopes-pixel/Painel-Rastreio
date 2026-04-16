@@ -1277,6 +1277,14 @@ def _ar_max_tracking_codes_one_ticket(
 _BR_CARRIER_FILTER_LABELS = ("Correios", "Jadlog", "Loggi")
 
 
+def _ne_cell_ticket_id_str(val: object) -> str:
+    """Alinha ticket_id de linha (int/float/str) ao formato usado em incluir_ticket_ids / NE_INCLUIR_TICKET_IDS."""
+    s = str(val).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
 def _ne_filter_df_br_carriers(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
     """Mantém tickets com quantidade > 0 em ao menos uma das transportadoras selecionadas."""
     if df.empty or not selected:
@@ -1299,15 +1307,28 @@ def _ne_filter_df_br_carriers(df: pd.DataFrame, selected: list[str]) -> pd.DataF
     return df.loc[mask].copy()
 
 
-def _ne_filter_df_ar_carriers(df: pd.DataFrame, selected: list[str]) -> pd.DataFrame:
-    """Mantém tickets com ao menos um segmento em `tracking_numbers_data` da transportadora."""
+def _ne_filter_df_ar_carriers(
+    df: pd.DataFrame,
+    selected: list[str],
+    *,
+    always_keep_ticket_ids: frozenset[str] | None = None,
+) -> pd.DataFrame:
+    """Mantém tickets com ao menos um segmento em `tracking_numbers_data` da transportadora.
+
+    ``always_keep_ticket_ids``: IDs forçados (JSON/env) permanecem visíveis mesmo se o filtro
+    de transportadora não casar (ex.: ticket de teste mapeado em \"Outros\" com checkbox off).
+    """
     if df.empty or not selected:
         return df
     if "tracking_numbers_data" not in df.columns:
         return df.iloc[0:0].copy()
     sel = set(selected)
+    keep_ids = always_keep_ticket_ids or frozenset()
 
     def _row_ok(row: pd.Series) -> bool:
+        if keep_ids and "ticket_id" in row.index:
+            if _ne_cell_ticket_id_str(row.get("ticket_id")) in keep_ids:
+                return True
         items = _parse_tracking_numbers_app_json(row.get("tracking_numbers_data"))
         if not items:
             return _AR_CARRIER_OTHER in sel
@@ -3119,11 +3140,16 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
 
     _carrier_pick = st.session_state.get(_sk_carrier, list(_cf_opts))
     _eff_carriers = _carrier_pick if _carrier_pick else list(_cf_opts)
+    _ar_force_ids: frozenset[str] | None = None
+    if is_ar:
+        _ids = ne._ticket_ids_from_env_and_temp_ar(ne.DATA_MODEL_AR, cfg)
+        if _ids:
+            _ar_force_ids = frozenset(_ids)
     if len(_eff_carriers) == len(_cf_opts):
         df = df_loaded
     else:
         df = (
-            _ne_filter_df_ar_carriers(df_loaded, _eff_carriers)
+            _ne_filter_df_ar_carriers(df_loaded, _eff_carriers, always_keep_ticket_ids=_ar_force_ids)
             if is_ar
             else _ne_filter_df_br_carriers(df_loaded, _eff_carriers)
         )
