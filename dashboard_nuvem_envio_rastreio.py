@@ -12,7 +12,7 @@ Antes: preencha zendesk_field_ids em nuvem_envio_rastreio_config.json
 Abas **Brasil** e **Argentina** em nuvem_envio_rastreio_config.json → `tabs`.
 Brasil: três transportadoras + status por ticket. Argentina: [AR] Envio Nube, volume e tempo por envio.
 Detalhe por ticket: gráfico de status, seletor na aba ou ?ne_codes=1 — tabela achatada (**tracking_numbers_data**;
-Brasil: linha por **code**; Argentina: todas as entradas do JSON (incl. ``(sem código)``); **id** interno não é rastreio). Amostra: ?ne_ticket= + ne_tab.
+Brasil: linha por **code**; Argentina: só entradas com **code** de rastreio preenchido (``id`` interno não é rastreio). Amostra: ?ne_ticket= + ne_tab.
 """
 from __future__ import annotations
 
@@ -872,9 +872,9 @@ def _parse_tracking_numbers_app_json(
     Todas as chaves cujo valor é **lista de objetos** são percorridas em ordem **alfabética da chave**
     (estável) e os itens são **concatenados** — nenhuma transportadora é ignorada.
 
-    Com ``require_shipment_code=True`` (padrão para gráficos/contagens): ficam só segmentos com
-    ``code`` de rastreio utilizável. Com ``False`` (detalhe AR): inclui também segmentos sem código
-    (ex.: epik só consulta), um objeto por entrada na lista.
+    Com ``require_shipment_code=True`` (padrão): ficam só segmentos com ``code`` de rastreio
+    utilizável (tabela detalhe AR, gráficos e contagens). Com ``False``: inclui também segmentos
+    sem código (só use se precisar inspecionar rascunhos no JSON).
 
     Aceita: lista de objetos; lista de strings JSON; objeto com `cards`/`items`/etc.;
     objeto único com `createdAt` e término (`finalizadoAt` ou `completedAt`).
@@ -1596,8 +1596,8 @@ def flatten_tracking_numbers_data_detail(
     Sem `status_rastreamento`, cai no modo antigo (só itens de `tracking_numbers_data`).
 
     **Argentina:** `for_argentina_tab=True` ignora o ramo por `status_rastreamento` (fluxo BR); só
-    `tracking_numbers_data` monta as linhas — evita tabela só com “-” quando o mapa de status não
-    casa com o JSON do app AR.
+    `tracking_numbers_data` monta as linhas — só segmentos com **code** preenchido (igual métricas
+    AR), evitando duplicatas “(sem código)” do mesmo envio.
     """
     tid = _norm_ticket_id(ticket_id)
     ex, nx = _parse_status_rastreamento_lookup(status_rastreamento_raw)
@@ -1605,10 +1605,7 @@ def flatten_tracking_numbers_data_detail(
     if for_argentina_tab:
         status_pairs = []
         ex, nx = {}, {}
-    items = _parse_tracking_numbers_app_json(
-        tracking_raw,
-        require_shipment_code=not for_argentina_tab,
-    )
+    items = _parse_tracking_numbers_app_json(tracking_raw, require_shipment_code=True)
     rows: list[dict[str, object]] = []
 
     def _append_row(
@@ -1694,10 +1691,10 @@ def flatten_tracking_numbers_data_detail(
         idx = 0
         for it in items:
             code = _tracking_display_code(it) or ""
-            if not for_argentina_tab and not str(code).strip():
+            if not str(code).strip():
                 continue
             idx += 1
-            disp_code = str(code).strip() if str(code).strip() else "(sem código)"
+            disp_code = str(code).strip()
             raw_map = _lookup_status_rastreamento_value(ex, nx, code)
             _append_row(idx, disp_code, it, raw_map, ar_detail_row=for_argentina_tab)
 
