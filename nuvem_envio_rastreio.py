@@ -139,8 +139,8 @@ _ROOT_KEYS_INHERITED_BY_TAB = (
 _EXTRA_GRUPOS_ARGENTINA_TEMP: tuple[str, ...] = ()
 
 # Argentina: estes ticket_id entram na query mesmo fora de grupo/BU (OR no WHERE). Preferir
-# ``tabs.argentina.incluir_ticket_ids`` no JSON; deixe esta tupla vazia em produção.
-_EXTRA_TICKET_IDS_ARGENTINA_TEMP: tuple[str, ...] = ()
+# ``tabs.argentina.incluir_ticket_ids`` no JSON; esvazie esta tupla quando não for mais teste.
+_EXTRA_TICKET_IDS_ARGENTINA_TEMP: tuple[str, ...] = ("7268849",)
 
 DATA_MODEL_BR = "br_three_carriers"
 DATA_MODEL_AR = "ar_tracking_single_field"
