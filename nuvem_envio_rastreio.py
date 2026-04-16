@@ -36,6 +36,7 @@ def _load_env_into_os() -> None:
     candidates.extend(
         [
             _DIR / ".env",
+            _DIR / "databricks" / ".env",
             _DIR / "credenciais" / ".env",
         ]
     )
@@ -127,8 +128,9 @@ _ROOT_KEYS_INHERITED_BY_TAB = (
 # Deploy: use também NE_FILTRO_GRUPO_EXTRA_ARGENTINA (lista separada por vírgula ou ;).
 _EXTRA_GRUPOS_ARGENTINA_TEMP: tuple[str, ...] = ()
 
-# Argentina: estes ticket_id entram na query mesmo fora de grupo/BU (OR no WHERE). Esvazie após testes.
-_EXTRA_TICKET_IDS_ARGENTINA_TEMP: tuple[str, ...] = ("7268849",)
+# Argentina: estes ticket_id entram na query mesmo fora de grupo/BU (OR no WHERE). Preferir
+# ``tabs.argentina.incluir_ticket_ids`` no JSON; deixe esta tupla vazia em produção.
+_EXTRA_TICKET_IDS_ARGENTINA_TEMP: tuple[str, ...] = ()
 
 DATA_MODEL_BR = "br_three_carriers"
 DATA_MODEL_AR = "ar_tracking_single_field"
@@ -260,11 +262,10 @@ BR_ZENDESK_FIELD_KEYS = _BR_FIELD_ORDER
 
 def build_sql(
     *,
-    start_date: str,
-    end_date: str,
+    window_start_ts: str,
+    window_end_ts: str,
     statuses: list[str],
     config: dict[str, Any],
-    limit: int | None = None,
     only_with_tracking_filled: bool = False,
 ) -> str:
     schema = str(config.get("catalog_schema") or "").strip()
@@ -340,12 +341,6 @@ def build_sql(
 
     status_list = ", ".join(f"'{_sql_escape(s)}'" for s in statuses)
 
-    limit_clause = ""
-    if limit is not None:
-        n = int(limit)
-        if n > 0:
-            limit_clause = f"LIMIT {n}"
-
     logical_set = {c[0] for c in extra_cols}
 
     _trk_fid_ar = ""
@@ -419,7 +414,7 @@ def build_sql(
             if parts:
                 tracking_filter_sql = "  AND (" + " OR ".join(parts) + ")\n"
 
-    # Com LIMIT, tickets forçados (total_qtd baixo) ficavam fora do TOP N — priorizar no ORDER BY.
+    # Tickets forçados (AR): priorizar no ORDER BY para aparecerem no topo ao analisar casos pontuais.
     if _tid_force and _ids_sql:
         order_by_sql = (
             "ORDER BY CASE WHEN CAST(t.id AS STRING) IN ("
@@ -429,9 +424,14 @@ def build_sql(
     else:
         order_by_sql = "ORDER BY total_qtd_rastreio DESC, t.updated_at DESC"
 
-    _d_lo = f"CAST(t.updated_at AS DATE) >= '{_sql_escape(start_date)}'"
-    _d_hi = f"CAST(t.updated_at AS DATE) <= '{_sql_escape(end_date)}'"
-    _date_core = f"({_d_lo} AND {_d_hi})"
+    # Janela em timestamp (dashboard envia limites em America/Sao_Paulo como string ``YYYY-MM-DD HH:mm:ss``).
+    # Filtro em ``updated_at`` permite uso de partition/cluster no lakehouse quando existir.
+    _ws = _sql_escape(window_start_ts.strip())
+    _we = _sql_escape(window_end_ts.strip())
+    _date_core = (
+        f"(CAST(t.updated_at AS TIMESTAMP) >= CAST('{_ws}' AS TIMESTAMP) "
+        f"AND CAST(t.updated_at AS TIMESTAMP) <= CAST('{_we}' AS TIMESTAMP))"
+    )
     # Argentina + IDs forçados: inclui o ticket mesmo fora do intervalo de datas (senão some do cf_raw).
     if _tid_force and _ids_sql and data_model == DATA_MODEL_AR:
         ticket_date_predicate = f"({_date_core} OR CAST(t.id AS STRING) IN ({_ids_sql}))"
@@ -461,13 +461,25 @@ cf_trk_fb AS (
 )"""
         _join_trk_fb = "\nLEFT JOIN cf_trk_fb fb ON fb.tid_s = CAST(t.id AS STRING)"
 
+    # Uma linha por ticket: pipelines Zendesk→lakehouse às vezes mantêm histórico (várias linhas com
+    # o mesmo ``id``). Sem isso, ``t.status`` pode ficar preso em ``open`` enquanto o Zendesk já fechou.
+    _dedupe_tickets_cte = f"""tickets_z AS (
+    SELECT *
+    FROM {schema}.tickets
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY id
+      ORDER BY COALESCE(updated_at, created_at) DESC NULLS LAST, id DESC
+    ) = 1
+),
+"""
+
     return f"""
-WITH cf_raw AS (
+WITH {_dedupe_tickets_cte}cf_raw AS (
     SELECT
         t.id AS ticket_id,
         get_json_object(cf_item, '$.id') AS cf_id,
         get_json_object(cf_item, '$.value') AS cf_val
-    FROM {schema}.tickets t
+    FROM tickets_z t
     LATERAL VIEW EXPLODE(FROM_JSON(t.custom_fields, 'ARRAY<STRING>')) e AS cf_item
     WHERE {ticket_date_predicate}
       AND t.status IN ({status_list})
@@ -490,7 +502,7 @@ SELECT
     p.bu,
     {_extra_select_sql},
     {total_qtd_sql}
-FROM {schema}.tickets t
+FROM tickets_z t
 LEFT JOIN {schema}.groups g ON t.group_id = g.id
 LEFT JOIN cf_pivot p ON CAST(p.ticket_id AS STRING) = CAST(t.id AS STRING){_join_trk_fb}
 WHERE {ticket_date_predicate}
@@ -503,7 +515,6 @@ WHERE {ticket_date_predicate}
     )}
   )
 {tracking_filter_sql}{order_by_sql}
-{limit_clause}
 """
 
 
@@ -608,14 +619,21 @@ def _ar_segment_count_from_tracking_raw(val: object) -> int:
 
 def fetch_dataframe(
     *,
-    start_date: str,
-    end_date: str,
+    window_start_ts: str | None = None,
+    window_end_ts: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     statuses: list[str] | None = None,
     config: dict[str, Any] | None = None,
-    limit: int | None = None,
     only_with_tracking_filled: bool | None = None,
     tab_key: str = "brasil",
 ) -> pd.DataFrame:
+    """Consulta Databricks e devolve um DataFrame novo a cada chamada (sem ``@st.cache_data`` no Streamlit).
+
+    Use ``window_start_ts`` / ``window_end_ts`` (``YYYY-MM-DD HH:mm:ss``) a partir do dashboard.
+    Para CLI legado, ``start_date`` / ``end_date`` (``YYYY-MM-DD``) viram meia-noite → fim do dia.
+    Não há ``LIMIT`` na SQL: o período define o volume retornado.
+    """
     _load_env_into_os()
     token = (os.getenv("databricks_token") or "").strip()
     host = (os.getenv("databricks_host") or "").strip()
@@ -637,12 +655,19 @@ def fetch_dataframe(
         only_track = bool(cfg.get("somente_com_rastreio_preenchido", False))
     else:
         only_track = only_with_tracking_filled
+    if window_start_ts and window_end_ts:
+        w0, w1 = window_start_ts.strip(), window_end_ts.strip()
+    elif start_date and end_date:
+        w0, w1 = f"{start_date.strip()} 00:00:00", f"{end_date.strip()} 23:59:59"
+    else:
+        raise ValueError(
+            "Informe window_start_ts e window_end_ts, ou start_date e end_date (YYYY-MM-DD)."
+        )
     sql = build_sql(
-        start_date=start_date,
-        end_date=end_date,
+        window_start_ts=w0,
+        window_end_ts=w1,
         statuses=st,
         config=cfg,
-        limit=limit,
         only_with_tracking_filled=only_track,
     )
 
@@ -729,12 +754,6 @@ def main() -> int:
         choices=("brasil", "argentina"),
         help="Com JSON em tabs.*: qual aba usar na consulta (padrão: brasil).",
     )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="Máximo de tickets retornados (0 = sem limite). Útil para testes.",
-    )
     g = parser.add_mutually_exclusive_group()
     g.add_argument(
         "--somente-rastreio",
@@ -748,7 +767,6 @@ def main() -> int:
     )
     args = parser.parse_args()
     statuses = [s.strip() for s in args.status.split(",") if s.strip()]
-    lim = args.limit if args.limit and args.limit > 0 else None
     track_filter: bool | None
     if args.somente_rastreio:
         track_filter = True
@@ -761,7 +779,6 @@ def main() -> int:
             start_date=args.start,
             end_date=args.end,
             statuses=statuses,
-            limit=lim,
             only_with_tracking_filled=track_filter,
             tab_key=args.tab,
         )

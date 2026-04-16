@@ -11,7 +11,8 @@ Antes: preencha zendesk_field_ids em nuvem_envio_rastreio_config.json
 (use sql_descobrir_campos_rastreio.sql no Databricks para achar os IDs).
 Abas **Brasil** e **Argentina** em nuvem_envio_rastreio_config.json → `tabs`.
 Brasil: três transportadoras + status por ticket. Argentina: [AR] Envio Nube, volume e tempo por envio.
-Detalhe por ticket: gráfico de status, seletor na aba ou ?ne_codes=1 — tabela achatada (**tracking_numbers_data**; cada linha = **code**; **id** interno não conta). Amostra: ?ne_ticket= + ne_tab.
+Detalhe por ticket: gráfico de status, seletor na aba ou ?ne_codes=1 — tabela achatada (**tracking_numbers_data**;
+Brasil: linha por **code**; Argentina: todas as entradas do JSON (incl. ``(sem código)``); **id** interno não é rastreio). Amostra: ?ne_ticket= + ne_tab.
 """
 from __future__ import annotations
 
@@ -21,8 +22,9 @@ import math
 import os
 import sys
 import urllib.parse
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 _DIR = Path(__file__).resolve().parent
 _NE_REPO_ROOT = _DIR
@@ -42,6 +44,40 @@ import streamlit.components.v1 as components
 _NE_ACCENT = "#0050c3"
 _NE_ACCENT_HOVER = "#0040a0"
 _NE_PAGE_TITLE = "Painel de Rastreamento"
+# Exibição de datas na amostra: Zendesk grava em UTC; operação BR costuma ler em Brasília.
+_NE_SAMPLE_TZ = ZoneInfo("America/Sao_Paulo")
+
+_NE_PERIOD_CHOICES: tuple[str, ...] = (
+    "Últimas 24h",
+    "Últimos 7 dias",
+    "Últimos 30 dias",
+    "Mês atual",
+)
+
+
+def _ne_period_window_timestamps(periodo: str) -> tuple[str, str]:
+    """Limites [início, fim] em ``YYYY-MM-DD HH:mm:ss`` (America/Sao_Paulo) para o filtro SQL em ``updated_at``."""
+    now = datetime.now(_NE_SAMPLE_TZ).replace(microsecond=0)
+    if periodo == "Últimas 24h":
+        start = now - timedelta(hours=24)
+        end = now
+    elif periodo == "Últimos 7 dias":
+        end = now
+        d0 = now.date() - timedelta(days=6)
+        start = datetime(d0.year, d0.month, d0.day, 0, 0, 0, tzinfo=_NE_SAMPLE_TZ)
+    elif periodo == "Últimos 30 dias":
+        end = now
+        d0 = now.date() - timedelta(days=29)
+        start = datetime(d0.year, d0.month, d0.day, 0, 0, 0, tzinfo=_NE_SAMPLE_TZ)
+    elif periodo == "Mês atual":
+        end = now
+        start = datetime(now.year, now.month, 1, 0, 0, 0, tzinfo=_NE_SAMPLE_TZ)
+    else:
+        end = now
+        d0 = now.date() - timedelta(days=6)
+        start = datetime(d0.year, d0.month, d0.day, 0, 0, 0, tzinfo=_NE_SAMPLE_TZ)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    return start.strftime(fmt), end.strftime(fmt)
 # Login — identidade Nuvemshop (UI dedicada)
 _NE_NS_BLUE = "#0045FF"
 _NE_NS_BLUE_HOVER = "#0038d6"
@@ -388,13 +424,20 @@ def _run_pending_ne_fetch(raw_cfg: dict) -> None:
         err_key = f"ne_{tab_key}_fetch_error"
         _render_full_page_loading_ne()
         try:
+            # Sessões antigas (start/end + limit): converte para janela timestamp.
+            if "window_start_ts" not in params and params.get("start") and params.get("end"):
+                params = {
+                    **params,
+                    "window_start_ts": f"{str(params['start']).strip()} 00:00:00",
+                    "window_end_ts": f"{str(params['end']).strip()} 23:59:59",
+                    "periodo": str(params.get("periodo") or "legado (datas antigas)"),
+                }
             # Sempre raw_cfg + tab_key: o merge por aba fica só em fetch_dataframe (evita config errada).
             df = ne.fetch_dataframe(
-                start_date=params["start"],
-                end_date=params["end"],
+                window_start_ts=params["window_start_ts"],
+                window_end_ts=params["window_end_ts"],
                 statuses=list(params["statuses"]),
                 config=raw_cfg,
-                limit=params.get("limit"),
                 only_with_tracking_filled=params.get("somente_rastreio"),
                 tab_key=tab_key,
             )
@@ -402,7 +445,12 @@ def _run_pending_ne_fetch(raw_cfg: dict) -> None:
             st.session_state[err_key] = str(e)
         else:
             st.session_state[sk_df] = df
-            st.session_state[sk_meta] = {"somente_rastreio": bool(params.get("somente_rastreio"))}
+            st.session_state[sk_meta] = {
+                "somente_rastreio": bool(params.get("somente_rastreio")),
+                "periodo": str(params.get("periodo") or ""),
+                "window_start_ts": str(params.get("window_start_ts") or ""),
+                "window_end_ts": str(params.get("window_end_ts") or ""),
+            }
             st.session_state.pop(err_key, None)
         st.rerun()
 
@@ -813,12 +861,20 @@ def _ar_format_preview_payload(raw: object, *, max_chars: int = 24000) -> str:
     return s[:cap]
 
 
-def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
+def _parse_tracking_numbers_app_json(
+    raw: object,
+    *,
+    require_shipment_code: bool = True,
+) -> list[dict]:
     """Segmentos/códigos serializados no custom field (JSON no Zendesk).
 
-    **Modelo Argentina ([AR] Envio Nube):** objeto por transportadora com ``code`` (rastreio),
-    ``id`` (só identificação interna — **não** conta nem aparece como código), ``carrier``, ``status``, etc.
-    Segmentos sem ``code`` preenchido (ex.: só “Solo consulta”) são **omitidos** de contagens e tabelas.
+    **Modelo Argentina ([AR] Envio Nube):** dicionário ``{ "correo": [...], "andreani": [...], ... }``.
+    Todas as chaves cujo valor é **lista de objetos** são percorridas em ordem **alfabética da chave**
+    (estável) e os itens são **concatenados** — nenhuma transportadora é ignorada.
+
+    Com ``require_shipment_code=True`` (padrão para gráficos/contagens): ficam só segmentos com
+    ``code`` de rastreio utilizável. Com ``False`` (detalhe AR): inclui também segmentos sem código
+    (ex.: epik só consulta), um objeto por entrada na lista.
 
     Aceita: lista de objetos; lista de strings JSON; objeto com `cards`/`items`/etc.;
     objeto único com `createdAt` e término (`finalizadoAt` ou `completedAt`).
@@ -827,12 +883,14 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
     nesse caso não usar ``json.loads(str(raw))`` (o ``str`` de uma lista usa aspas simples e quebra o JSON).
     """
 
-    def _keep_with_shipment_code(segments: list[dict]) -> list[dict]:
-        """Só segmentos com código de rastreio utilizável (regra em ``_tracking_display_code``)."""
+    def _filter_segments(segments: list[dict]) -> list[dict]:
+        dicts = [d for d in segments if isinstance(d, dict)]
+        if not require_shipment_code:
+            return dicts
         return [
             d
-            for d in segments
-            if isinstance(d, dict) and bool(str(_tracking_display_code(d) or "").strip())
+            for d in dicts
+            if bool(str(_tracking_display_code(d) or "").strip())
         ]
 
     def _coerce_list(obj: object) -> list[object]:
@@ -878,11 +936,13 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
                             return inner
                         if isinstance(inner, dict):
                             return _coerce_list(inner)
-            # App AR [Envio Nube]: { "correo": [...], "andreani": [...], "epik": [...] } — só listas de objetos.
+            # App AR [Envio Nube]: { "correo": [...], "andreani": [...], "epik": [...] } — todas as listas.
             if obj and all(isinstance(v, list) for v in obj.values()):
                 merged: list[object] = []
-                for v in obj.values():
-                    merged.extend(v)
+                for _carrier_key in sorted(obj.keys(), key=lambda x: str(x).casefold()):
+                    v = obj.get(_carrier_key)
+                    if isinstance(v, list):
+                        merged.extend(v)
                 if merged and all(isinstance(x, dict) for x in merged):
                     return merged
             if any(
@@ -951,16 +1011,12 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
 
     if isinstance(raw, dict):
         a = _finalize_root(raw)
-        return _keep_with_shipment_code(a) if a else _keep_with_shipment_code(
-            _tracking_json_loose_dict_segments(raw)
-        )
+        return _filter_segments(a) if a else _filter_segments(_tracking_json_loose_dict_segments(raw))
 
     if isinstance(raw, (list, tuple)):
         lst = list(raw)
         a = _finalize_root(lst)
-        return _keep_with_shipment_code(a) if a else _keep_with_shipment_code(
-            _tracking_json_loose_dict_segments(lst)
-        )
+        return _filter_segments(a) if a else _filter_segments(_tracking_json_loose_dict_segments(lst))
 
     s = str(raw).strip()
     if not s or s.lower() in ("{}", "null", "none", "nan", "[]"):
@@ -977,9 +1033,7 @@ def _parse_tracking_numbers_app_json(raw: object) -> list[dict]:
     except json.JSONDecodeError:
         return []
     a = _finalize_root(parsed)
-    return _keep_with_shipment_code(a) if a else _keep_with_shipment_code(
-        _tracking_json_loose_dict_segments(parsed)
-    )
+    return _filter_segments(a) if a else _filter_segments(_tracking_json_loose_dict_segments(parsed))
 
 
 def _tracking_display_code(it: dict) -> str:
@@ -1530,7 +1584,10 @@ def flatten_tracking_numbers_data_detail(
     if for_argentina_tab:
         status_pairs = []
         ex, nx = {}, {}
-    items = _parse_tracking_numbers_app_json(tracking_raw)
+    items = _parse_tracking_numbers_app_json(
+        tracking_raw,
+        require_shipment_code=not for_argentina_tab,
+    )
     rows: list[dict[str, object]] = []
 
     def _append_row(
@@ -1568,6 +1625,9 @@ def flatten_tracking_numbers_data_detail(
             prefer_app_status_over_zendesk=ar_detail_row,
         )
         op_label = _DETAIL_STATUS_INTERNAL_LABEL.get(cat, "Outros")
+        app_status_txt = (
+            _tracking_item_inline_status_raw(itd, ar_app_segment=ar_detail_row) if has_segment else ""
+        )
         car_raw = _tracking_display_carrier(itd) if has_segment else ""
         car_disp = car_raw if car_raw else "—"
         car_ar = _ar_canonical_carrier(car_raw)
@@ -1587,6 +1647,7 @@ def flatten_tracking_numbers_data_detail(
                 "situacao": situacao,
                 "status_operacional": op_label,
                 "status_zendesk": raw_z,
+                "status_app_json": app_status_txt,
                 "guru": guru,
                 "ttr_formatado": ttr_fmt,
             }
@@ -1612,11 +1673,12 @@ def flatten_tracking_numbers_data_detail(
         idx = 0
         for it in items:
             code = _tracking_display_code(it) or ""
-            if not code:
+            if not for_argentina_tab and not str(code).strip():
                 continue
             idx += 1
+            disp_code = str(code).strip() if str(code).strip() else "(sem código)"
             raw_map = _lookup_status_rastreamento_value(ex, nx, code)
-            _append_row(idx, code, it, raw_map, ar_detail_row=for_argentina_tab)
+            _append_row(idx, disp_code, it, raw_map, ar_detail_row=for_argentina_tab)
 
     if not rows and for_argentina_tab and _ar_raw_tracking_field_nonempty(tracking_raw):
         blob = _ar_format_preview_payload(tracking_raw, max_chars=12000).strip()
@@ -1637,6 +1699,7 @@ def flatten_tracking_numbers_data_detail(
                     "situacao": "Em aberto",
                     "status_operacional": "",
                     "status_zendesk": blob,
+                    "status_app_json": "",
                     "guru": "—",
                     "ttr_formatado": "—",
                 }
@@ -1684,6 +1747,7 @@ def _detail_df_fallback_lines(ticket_id: str, n_lines: int) -> pd.DataFrame:
                 "situacao": _NE_TBL_DASH,
                 "status_operacional": _NE_TBL_DASH,
                 "status_zendesk": "",
+                "status_app_json": "",
                 "guru": _NE_TBL_DASH,
                 "ttr_formatado": _NE_TBL_DASH,
             }
@@ -1731,11 +1795,13 @@ def _query_param_first(key: str) -> str | None:
     return str(v).strip() if v is not None else None
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=900)
 def _cached_amostra_ticket_map(json_abs_path: str, file_mtime: float) -> dict[str, dict]:
     """Índice ticket_id normalizado → objeto ticket do JSON da amostra.
 
     file_mtime entra na chave de cache para refletir edições no arquivo sem reiniciar o app.
+    **TTL 15 min:** dados do Databricks vêm em ``session_state`` (sem ``cache_data``); este cache
+    cobre só o JSON de **amostra** local. Use **Limpar cache Streamlit** na barra lateral para forçar releitura.
     """
     p = Path(json_abs_path)
     if not p.is_file():
@@ -1926,6 +1992,65 @@ def _df_row_for_ticket_id(df: pd.DataFrame | None, tid: str) -> pd.Series | None
 _NE_DETAIL_SEL_NONE = "— Nenhum painel —"
 
 
+def _ne_debug_write_tracking_raw(raw: object, *, max_chars: int = 100_000) -> None:
+    """Debug: mostra o valor exato de ``tracking_numbers_data`` na linha do DataFrame (Databricks)."""
+    if raw is None:
+        st.caption("`tracking_numbers_data` é **null** nesta linha.")
+        return
+    try:
+        if pd.api.types.is_scalar(raw) and pd.isna(raw):
+            st.caption("`tracking_numbers_data` é **NaN** nesta linha.")
+            return
+    except (TypeError, ValueError):
+        pass
+    try:
+        if isinstance(raw, (dict, list)):
+            st.json(raw)
+            return
+    except Exception as exc:
+        st.caption(f"Não foi possível usar ``st.json`` ({exc!s}); segue texto.")
+    try:
+        blob = _ar_format_preview_payload(raw, max_chars=max_chars).strip()
+        if blob.startswith("{") or blob.startswith("["):
+            st.code(blob, language="json")
+        else:
+            st.write(blob if len(blob) <= 8000 else blob[:8000] + "\n… (truncado)")
+    except Exception:
+        st.write(str(raw)[:max_chars])
+
+
+def _ne_status_display_cells(detail_df: pd.DataFrame, *, tab: str) -> list[str]:
+    """Texto da coluna Status na tabela do painel; Argentina prioriza o ``status`` literal do JSON do app."""
+    merged: list[str] = []
+    for _z, _o in zip(
+        detail_df["status_zendesk"].tolist(),
+        detail_df["status_operacional"].tolist(),
+    ):
+        _zs = _ne_dash_cell(_z)
+        _os = _ne_dash_cell(_o)
+        if _zs == _NE_TBL_DASH and _os == _NE_TBL_DASH:
+            merged.append(_NE_TBL_DASH)
+        elif _zs == _NE_TBL_DASH:
+            merged.append(_os)
+        elif _os == _NE_TBL_DASH or _zs == _os:
+            merged.append(_zs)
+        else:
+            merged.append(f"{_zs} | {_os}")
+    if tab != "argentina" or "status_app_json" not in detail_df.columns:
+        return merged
+    out: list[str] = []
+    for app_s, m in zip(
+        detail_df["status_app_json"].fillna("").astype(str).str.strip().tolist(),
+        merged,
+    ):
+        low = app_s.lower()
+        if app_s and low not in ("null", "none", "nan", "{}"):
+            out.append(app_s)
+        else:
+            out.append(m)
+    return out
+
+
 def _ticket_ids_with_tracking(df: pd.DataFrame | None) -> list[str]:
     """Tickets com detalhe possível: `status_rastreamento` (código→status) e/ou `tracking_numbers_data`."""
     if df is None or df.empty or "ticket_id" not in df.columns:
@@ -2074,22 +2199,19 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
             st.session_state["_ne_sync_pick_widget"] = tab
             st.rerun()
 
-    with st.expander("Tabela: código, guru, TTR, transportadora, status", expanded=True):
-        _status_cells: list[str] = []
-        for _z, _o in zip(
-            detail_df["status_zendesk"].tolist(),
-            detail_df["status_operacional"].tolist(),
+    if "tracking_numbers_data" in row.index:
+        with st.expander(
+            "Debug: JSON bruto (`tracking_numbers_data` nesta linha do Databricks)",
+            expanded=False,
         ):
-            _zs = _ne_dash_cell(_z)
-            _os = _ne_dash_cell(_o)
-            if _zs == _NE_TBL_DASH and _os == _NE_TBL_DASH:
-                _status_cells.append(_NE_TBL_DASH)
-            elif _zs == _NE_TBL_DASH:
-                _status_cells.append(_os)
-            elif _os == _NE_TBL_DASH or _zs == _os:
-                _status_cells.append(_zs)
-            else:
-                _status_cells.append(f"{_zs} | {_os}")
+            st.caption(
+                "Compare com o custom field no Zendesk. A consulta SQL **não** passa por "
+                "``@st.cache_data``; o que importa para dados “velhos” é o **replicado no lakehouse**."
+            )
+            _ne_debug_write_tracking_raw(_tr_raw)
+
+    with st.expander("Tabela: código, guru, TTR, transportadora, status", expanded=True):
+        _status_cells = _ne_status_display_cells(detail_df, tab=tab)
         _disp = pd.DataFrame(
             {
                 "Código": detail_df["codigo_rastreio"].map(_ne_dash_cell),
@@ -2801,13 +2923,27 @@ def _ne_format_grupo_sample(val: object) -> str:
     return t
 
 
+def _ne_ts_series_brasilia(s: pd.Series) -> pd.Series:
+    """Converte timestamps do lakehouse para America/Sao_Paulo (naive → assume UTC)."""
+    ts = pd.to_datetime(s, utc=True, errors="coerce")
+    try:
+        return ts.dt.tz_convert(_NE_SAMPLE_TZ)
+    except (TypeError, AttributeError):
+        return ts
+
+
 def _ne_prepare_sample_display_df(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
     use = [c for c in cols if c in df.columns]
-    sub = df.loc[:, use].head(500).copy()
+    # Evita serialização gigante no browser; CSV completo segue disponível no download.
+    _cap = min(3000, max(400, len(df)))
+    sub = df.loc[:, use].head(_cap).copy()
     if "ticket_id" in sub.columns:
         sub["ticket_id"] = sub["ticket_id"].map(_ne_format_ticket_id_sample)
     if "grupo" in sub.columns:
         sub["grupo"] = sub["grupo"].map(_ne_format_grupo_sample)
+    for col in ("created_at", "updated_at"):
+        if col in sub.columns:
+            sub[col] = _ne_ts_series_brasilia(sub[col])
     for col in ("tracking_numbers_data", "status_rastreamento"):
         if col in sub.columns:
             sub[col] = sub[col].map(_ne_truncate_sample_text)
@@ -2829,8 +2965,8 @@ def _ne_sample_column_config(cols: list[str]) -> dict[str, object]:
         "quantidade_rastreio_loggi_num": "Loggi",
         "status_rastreamento": "Situação por código (JSON)",
         "tracking_numbers_data": "Dados de rastreio (JSON)",
-        "created_at": "Criado em",
-        "updated_at": "Atualizado em",
+        "created_at": "Criado em (Brasília)",
+        "updated_at": "Atualizado em (Brasília)",
     }
     cfg: dict[str, object] = {}
     for c in cols:
@@ -2896,14 +3032,19 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
         )
 
     _sk_carrier = f"ne_{k}_carrier_filter"
-    col1, col2, col3, col4, col5 = st.columns([1.0, 1.0, 1.35, 0.82, 1.45])
-    today = date.today()
-    default_start = today - timedelta(days=14)
+    col1, col2, col3 = st.columns([1.05, 1.25, 1.45])
     with col1:
-        start = st.date_input("Atualizado desde", value=default_start, key=f"ne_{k}_start")
+        periodo = st.selectbox(
+            "Período",
+            options=list(_NE_PERIOD_CHOICES),
+            index=1,
+            key=f"ne_{k}_periodo",
+            help=(
+                "Janela sobre **updated_at** do ticket no lakehouse, em **horário de Brasília**. "
+                "“Mês atual” = do dia 1 até agora."
+            ),
+        )
     with col2:
-        end = st.date_input("Atualizado até", value=today, key=f"ne_{k}_end")
-    with col3:
         status_opts = ["new", "open", "pending", "hold", "solved", "closed"]
         statuses = st.multiselect(
             "Status do ticket",
@@ -2911,17 +3052,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             default=status_opts,
             key=f"ne_{k}_statuses",
         )
-    with col4:
-        max_tickets = st.number_input(
-            "Máx. tickets",
-            min_value=0,
-            max_value=100_000,
-            value=10,
-            step=1,
-            key=f"ne_{k}_max_t",
-            help="0 = sem limite (cuidado: consulta pesada). Para teste use 10.",
-        )
-    with col5:
+    with col3:
         st.multiselect(
             "Transportadora",
             options=_cf_opts,
@@ -2937,7 +3068,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             "Mantém só tickets que já têm pedido de rastreio (transportadora ou situação de rastreio preenchidos)."
         )
     )
-    _row_pad, _row_chk = st.columns([4.2, 1])
+    _row_pad, _row_chk, _row_cache = st.columns([3.65, 1.05, 1.1])
     with _row_chk:
         somente_rastreio = st.checkbox(
             "Só com rastreio",
@@ -2945,28 +3076,44 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             help=_chk_help,
             key=f"ne_{k}_somente",
         )
+    with _row_cache:
+        if st.button(
+            "Limpar cache",
+            key=f"ne_{k}_clear_cache",
+            help=(
+                "Chama ``st.cache_data.clear()`` (ex.: índice da **amostra JSON** local). "
+                "Dados do Databricks dependem de **Atualizar dados**, não deste cache."
+            ),
+        ):
+            st.cache_data.clear()
+            st.success("Cache Streamlit limpo. Recarregue a amostra ou **Atualizar dados** se precisar.")
 
     _sk_pending = f"ne_{k}_pending_fetch"
     if st.button("Atualizar dados", type="primary", key=f"ne_{k}_btn_refresh"):
         if not statuses:
             st.error("Selecione ao menos um status.")
         else:
-            _lim = int(max_tickets) if max_tickets and max_tickets > 0 else None
+            _w0, _w1 = _ne_period_window_timestamps(periodo)
             st.session_state[_sk_pending] = {
-                "start": start.isoformat(),
-                "end": end.isoformat(),
+                "window_start_ts": _w0,
+                "window_end_ts": _w1,
+                "periodo": periodo,
                 "statuses": list(statuses),
-                "limit": _lim,
                 "somente_rastreio": somente_rastreio,
             }
             st.rerun()
 
     df_loaded = st.session_state.get(sk_df)
     if df_loaded is None or df_loaded.empty:
-        st.info("Clique em **Atualizar dados** para carregar. Período padrão: últimas 2 semanas.")
+        st.info(
+            "Escolha o **Período**, os filtros desejados e clique em **Atualizar dados** para carregar do Databricks "
+            "(sem limite de linhas na consulta — o volume depende só do intervalo e dos status marcados)."
+        )
         return
 
     _meta = st.session_state.get(sk_meta) or {}
+    _per_lbl = str(_meta.get("periodo") or "").strip()
+    _per_extra = f" · período carregado: **{_per_lbl}**" if _per_lbl else ""
     filtro_txt = " + só com rastreio preenchido" if _meta.get("somente_rastreio") else ""
     _country_lbl = "Argentina · [AR] Envio Nube" if is_ar else "Brasil · Nuvem Envio"
 
@@ -2983,15 +3130,34 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
 
     if len(df) == len(df_loaded):
         st.success(
-            f"**{len(df)}** tickets ({_country_lbl}{filtro_txt}). "
+            f"**{len(df)}** tickets ({_country_lbl}{filtro_txt}){_per_extra}. "
             "Ordenados por **total** (maior primeiro)."
         )
     else:
         st.success(
             f"**{len(df)}** tickets exibidos (de **{len(df_loaded)}** carregados) "
-            f"com filtro de transportadora · {_country_lbl}{filtro_txt}. "
+            f"com filtro de transportadora · {_country_lbl}{filtro_txt}{_per_extra}. "
             "Ordenados por **total** (maior primeiro)."
         )
+
+    _lag_msg: list[str] = []
+    if "updated_at" in df_loaded.columns:
+        _u_mx = pd.to_datetime(df_loaded["updated_at"], utc=True, errors="coerce").max()
+        if pd.notna(_u_mx):
+            _lag_msg.append(
+                f"Maior **updated_at** neste lote (após deduplicar por ticket): "
+                f"**{_u_mx.tz_convert(_NE_SAMPLE_TZ).strftime('%d/%m/%Y %H:%M')} (Brasília)**."
+            )
+    try:
+        _now_br = datetime.now(_NE_SAMPLE_TZ).strftime("%d/%m/%Y %H:%M")
+        _lag_msg.append(
+            f"Referência: **{_now_br} (Brasília)**. Os valores vêm só do **Databricks** no clique em "
+            "**Atualizar dados** — o Zendesk pode estar minutos à frente até o pipeline replicar."
+        )
+    except OSError:
+        pass
+    if _lag_msg:
+        st.caption(" ".join(_lag_msg))
 
     def _total_tres_transportadoras(frame: pd.DataFrame) -> float:
         s = 0.0
@@ -3133,16 +3299,19 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                     "a largura usa o total de códigos quando existir, senão **1** só para o ticket aparecer no eixo (não significa “1 código” real). "
                 )
                 + "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
-                "cada **code** em **tracking_numbers_data** e o **agente** (**agentName**)."
+                "cada **code** em **tracking_numbers_data** e o **agente** (**agentName**). "
+                "Com muitos tickets no período, use este controle para manter o gráfico fluido (a tabela e o CSV usam o lote completo)."
             )
+            _top_default = min(80, max(15, _n))
+            _top_max = min(250, max(1, _n))
             _top_status = st.number_input(
                 "Quantidade de tickets neste gráfico",
                 min_value=1,
-                max_value=max(1, _n),
-                value=min(100, _n),
+                max_value=_top_max,
+                value=min(_top_default, _top_max),
                 step=1,
                 key=f"ne_{k}_status_stack_top_n",
-                help="Mostra os primeiros tickets nessa ordem; reduza se o gráfico ficar apertado.",
+                help="Só o eixo Y do gráfico é limitado; métricas e export usam todos os tickets carregados.",
             )
             _long_status, _ticket_order_status = _long_df_tracking_status_by_ticket(
                 df, _top_status, for_argentina_tab=is_ar
@@ -3151,7 +3320,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                 st.info("Não há barras para exibir: neste recorte não há códigos com situação para mostrar.")
             else:
                 _long_status = _long_status.copy()
-                _h_status = max(280, min(900, len(_ticket_order_status) * 28))
+                _h_status = max(260, min(720, len(_ticket_order_status) * 26))
                 _pick = alt.selection_point(
                     fields=["ticket_id"],
                     name="ne_status_bar_pick",
@@ -3305,7 +3474,10 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
     st.subheader("Amostra de tickets")
     st.caption(
         "Ordem pensada para leitura: **ticket → totais → transportadoras / JSON de rastreio → datas**. "
-        "Campos JSON longos vêm **abreviados** na tela; o botão de CSV traz o texto completo."
+        "Campos JSON longos vêm **abreviados** na tela; o botão de CSV traz o texto completo. "
+        "**Status do ticket** vem da coluna nativa do Zendesk na tabela do lakehouse; a consulta usa "
+        "**uma linha por `id`** (a mais recente por `updated_at`), para não exibir `open` de uma carga antiga "
+        "quando o caso já está `closed`."
     )
     _sam_cols = _ne_sample_column_order(df, is_ar)
     if not _sam_cols:
@@ -3318,6 +3490,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
             use_container_width=True,
             hide_index=True,
             column_config=_cc,
+            height=min(720, 320 + min(len(_disp), 80) * 28),
         )
 
     with st.expander("Ideias de medição e acompanhamento"):
@@ -3332,9 +3505,17 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
 """
         )
 
+    _n_dl = len(df)
+    _dl_cap = 200_000
+    _dl_df = df if _n_dl <= _dl_cap else df.head(_dl_cap)
+    if _n_dl > _dl_cap:
+        st.caption(
+            f"Export CSV limitado às primeiras **{_dl_cap:,}** linhas (total no período: **{_n_dl:,}**). "
+            "Para extrair tudo, use o job no Databricks ou reduza o período."
+        )
     st.download_button(
-        "Baixar CSV (até 50k linhas)",
-        df.head(50000).to_csv(index=False).encode("utf-8-sig"),
+        f"Baixar CSV ({_n_dl:,} linhas)" if _n_dl <= _dl_cap else f"Baixar CSV (primeiras {_dl_cap:,} de {_n_dl:,})",
+        _dl_df.to_csv(index=False).encode("utf-8-sig"),
         file_name=f"nuvem_envio_rastreio_{k}.csv",
         mime="text/csv",
         key=f"ne_{k}_dl_csv",

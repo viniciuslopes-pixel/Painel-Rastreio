@@ -1,6 +1,8 @@
 # Tema claro por padrão (ignora preferência do sistema / modo escuro do navegador).
 [theme]
 base = "light"
+# Cor primária oficial Nuvemshop (botões primary / form submit no Streamlit ≥1.28).
+primaryColor = "#0045FF"
 
 # Em produção (Streamlit Community Cloud) a plataforma define host/porta.
 # Localmente: use http://localhost:8501 ou, se precisar, `streamlit run ... --server.address 127.0.0.1`.
