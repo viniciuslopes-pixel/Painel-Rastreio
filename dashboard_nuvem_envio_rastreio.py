@@ -2010,33 +2010,6 @@ def _df_row_for_ticket_id(df: pd.DataFrame | None, tid: str) -> pd.Series | None
 _NE_DETAIL_SEL_NONE = "— Nenhum painel —"
 
 
-def _ne_debug_write_tracking_raw(raw: object, *, max_chars: int = 100_000) -> None:
-    """Debug: mostra o valor exato de ``tracking_numbers_data`` na linha do DataFrame (Databricks)."""
-    if raw is None:
-        st.caption("`tracking_numbers_data` é **null** nesta linha.")
-        return
-    try:
-        if pd.api.types.is_scalar(raw) and pd.isna(raw):
-            st.caption("`tracking_numbers_data` é **NaN** nesta linha.")
-            return
-    except (TypeError, ValueError):
-        pass
-    try:
-        if isinstance(raw, (dict, list)):
-            st.json(raw)
-            return
-    except Exception as exc:
-        st.caption(f"Não foi possível usar ``st.json`` ({exc!s}); segue texto.")
-    try:
-        blob = _ar_format_preview_payload(raw, max_chars=max_chars).strip()
-        if blob.startswith("{") or blob.startswith("["):
-            st.code(blob, language="json")
-        else:
-            st.write(blob if len(blob) <= 8000 else blob[:8000] + "\n… (truncado)")
-    except Exception:
-        st.write(str(raw)[:max_chars])
-
-
 def _ne_status_display_cells(detail_df: pd.DataFrame, *, tab: str) -> list[str]:
     """Texto da coluna Status na tabela do painel; Argentina prioriza o ``status`` literal do JSON do app."""
     merged: list[str] = []
@@ -2217,49 +2190,38 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
             st.session_state["_ne_sync_pick_widget"] = tab
             st.rerun()
 
-    if "tracking_numbers_data" in row.index:
-        with st.expander(
-            "Debug: JSON bruto (`tracking_numbers_data` nesta linha do Databricks)",
-            expanded=False,
-        ):
-            st.caption(
-                "Compare com o custom field no Zendesk. A consulta SQL **não** passa por "
-                "``@st.cache_data``; o que importa para dados “velhos” é o **replicado no lakehouse**."
-            )
-            _ne_debug_write_tracking_raw(_tr_raw)
-
-    with st.expander("Tabela: código, guru, TTR, transportadora, status", expanded=True):
-        _status_cells = _ne_status_display_cells(detail_df, tab=tab)
-        _disp = pd.DataFrame(
-            {
-                "Código": detail_df["codigo_rastreio"].map(_ne_dash_cell),
-                "Guru": detail_df["guru"].map(_ne_dash_cell),
-                "TTR": detail_df["ttr_formatado"].map(_ne_dash_cell),
-                "Transportadora": detail_df["transportadora"].map(_ne_dash_cell),
-                "Status": _status_cells,
-            }
-        )
-        # Só texto — evita falha na serialização Arrow; sem ``disabled=`` (não existe na API atual).
-        _disp = _disp.astype(str)
-        st.dataframe(
-            _disp,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Código": st.column_config.TextColumn("Código", width="large"),
-                "Guru": st.column_config.TextColumn("Guru", width="medium"),
-                "TTR": st.column_config.TextColumn(
-                    "TTR",
-                    help="Tempo até resolução quando há datas no JSON de rastreio.",
-                ),
-                "Transportadora": st.column_config.TextColumn("Transportadora", width="medium"),
-                "Status": st.column_config.TextColumn(
-                    "Status",
-                    help="Valor do Zendesk e/ou categoria agrupada.",
-                    width="large",
-                ),
-            },
-        )
+    st.subheader("Tabela: código, guru, TTR, transportadora, status")
+    _status_cells = _ne_status_display_cells(detail_df, tab=tab)
+    _disp = pd.DataFrame(
+        {
+            "Código": detail_df["codigo_rastreio"].map(_ne_dash_cell),
+            "Guru": detail_df["guru"].map(_ne_dash_cell),
+            "TTR": detail_df["ttr_formatado"].map(_ne_dash_cell),
+            "Transportadora": detail_df["transportadora"].map(_ne_dash_cell),
+            "Status": _status_cells,
+        }
+    )
+    # Só texto — evita falha na serialização Arrow; sem ``disabled=`` (não existe na API atual).
+    _disp = _disp.astype(str)
+    st.dataframe(
+        _disp,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Código": st.column_config.TextColumn("Código", width="large"),
+            "Guru": st.column_config.TextColumn("Guru", width="medium"),
+            "TTR": st.column_config.TextColumn(
+                "TTR",
+                help="Tempo até resolução quando há datas no JSON de rastreio.",
+            ),
+            "Transportadora": st.column_config.TextColumn("Transportadora", width="medium"),
+            "Status": st.column_config.TextColumn(
+                "Status",
+                help="Valor do Zendesk e/ou categoria agrupada.",
+                width="large",
+            ),
+        },
+    )
 
     zurl = str(cfg.get("zendesk_ticket_url_template") or "").strip()
     if zurl and "{ticket_id}" in zurl:
@@ -3321,7 +3283,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                     else "Tickets **sem** chave em `status_rastreamento` aparecem como faixa **Sem informação de status**; "
                     "a largura usa o total de códigos quando existir, senão **1** só para o ticket aparecer no eixo (não significa “1 código” real). "
                 )
-                + "**Clique numa barra** para abrir o detalhe (sem sair da página — mantém sessão e dados carregados): "
+                + "**Clique numa barra** para abrir a **tabela de detalhe logo abaixo** (mantém sessão e dados carregados): "
                 "cada **code** em **tracking_numbers_data** e o **agente** (**agentName**). "
                 "Com muitos tickets no período, use este controle para manter o gráfico fluido (a tabela e o CSV usam o lote completo)."
             )
@@ -3409,7 +3371,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                         "Ticket para painel de detalhe (códigos, status, guru, TTR)",
                         options=_all_opts,
                         key=_sel_key,
-                        help="Abre o painel no topo da página. **Nenhum painel** fecha o detalhe. "
+                        help="Mostra a tabela de códigos **logo abaixo do gráfico**. **Nenhum painel** fecha o detalhe. "
                         "Clicar numa barra do gráfico também seleciona o ticket.",
                     )
                     _want_tid = st.session_state.get("ne_codes_ticket")
@@ -3428,6 +3390,11 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                             st.session_state["ne_codes_ticket"] = _pn
                             st.session_state["ne_codes_tab"] = k
                             st.rerun()
+
+            _ne_ptid = st.session_state.get("ne_codes_ticket")
+            _ne_ptab = st.session_state.get("ne_codes_tab")
+            if _ne_ptid and _ne_ptab == k:
+                _render_ticket_codes_guru_panel(raw_cfg, str(_ne_ptid), k)
 
     if is_ar:
         st.subheader("Volume por transportadora (Argentina)")
@@ -3573,11 +3540,7 @@ _run_pending_ne_fetch(raw_cfg)
 
 _ne_codes_tid = st.session_state.get("ne_codes_ticket")
 _ne_codes_tab = st.session_state.get("ne_codes_tab")
-if _ne_codes_tid and _ne_codes_tab:
-    _render_ticket_codes_guru_panel(
-        raw_cfg, str(_ne_codes_tid), str(_ne_codes_tab)
-    )
-elif _ne_qp_ticket:
+if _ne_qp_ticket and not (_ne_codes_tid and _ne_codes_tab):
     _render_amostra_ticket_panel(raw_cfg, _ne_qp_ticket)
 
 st.markdown(
