@@ -629,8 +629,126 @@ def _find_tracking_item_for_code(items: list[dict], scode: str) -> dict | None:
     return None
 
 
+_BR_CARRIER_KEYS = ("Correios", "Jadlog", "Loggi", "Loggi Coleta")
+
+
+def _is_br_carrier_dict(raw: object) -> bool:
+    """True se ``status_rastreamento`` é o formato Brasil: {Transportadora: [{code, status, ...}]}."""
+    d = _coerce_status_rastreamento_dict(raw)
+    if not d:
+        return False
+    return any(k in d for k in _BR_CARRIER_KEYS)
+
+
+def _strip_nuvemshop_suffix(name: str) -> str:
+    """Remove ' da Nuvemshop' do nome do guru (case-insensitive)."""
+    import re
+    return re.sub(r"\s+da\s+nuvemshop\s*$", "", name.strip(), flags=re.IGNORECASE).strip()
+
+
+def _parse_status_rastreamento_br_carrier_dict(
+    raw: object,
+) -> list[dict[str, object]]:
+    """Parse do formato Brasil de ``status_rastreamento``.
+
+    Formato esperado::
+
+        {
+            "Correios": [],
+            "Jadlog": [{"code": "123", "status": "aberto", "lastUpdatedBy": "Mat da Nuvemshop", "detectedAt": "...", ...}],
+            "Loggi": [],
+            "Loggi Coleta": []
+        }
+
+    Retorna lista de dicts com as chaves normalizadas. Cobre dois sub-casos:
+    - **Formato rico** (chaves são nomes de transportadora com listas de objetos): extrai todos os
+      campos do objeto mais a transportadora.
+    - **Fallback** (formato simples ``{code: status}``): extrai código e status, transportadora "-".
+    """
+    d = _coerce_status_rastreamento_dict(raw)
+    if not d:
+        return []
+
+    rows: list[dict[str, object]] = []
+
+    if _is_br_carrier_dict(raw):
+        for carrier_key in _BR_CARRIER_KEYS:
+            items = d.get(carrier_key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                code = str(item.get("code") or "").strip()
+                if not code:
+                    continue
+                guru_raw = str(item.get("lastUpdatedBy") or item.get("guru") or "").strip()
+                guru = _strip_nuvemshop_suffix(guru_raw) if guru_raw else "-"
+                status = str(item.get("status") or "").strip() or "-"
+                detected_at = str(item.get("detectedAt") or "").strip()
+                ttr_txt = "-"
+                if detected_at:
+                    try:
+                        from datetime import timezone
+                        import dateutil.parser as _dp
+                        t0 = _dp.parse(detected_at)
+                        now = datetime.now(timezone.utc)
+                        if t0.tzinfo is None:
+                            t0 = t0.replace(tzinfo=timezone.utc)
+                        diff_h = (now - t0).total_seconds() / 3600
+                        ttr_txt = _format_ttr_hours_compact(diff_h)
+                    except Exception:
+                        ttr_txt = "-"
+                rows.append({
+                    "codigo_rastreio": code,
+                    "transportadora": carrier_key,
+                    "guru": guru,
+                    "status": status,
+                    "ttr_formatado": ttr_txt,
+                })
+    else:
+        for code, status_val in d.items():
+            code_s = str(code).strip()
+            if not code_s:
+                continue
+            rows.append({
+                "codigo_rastreio": code_s,
+                "transportadora": "-",
+                "guru": "-",
+                "status": str(status_val or "").strip() or "-",
+                "ttr_formatado": "-",
+            })
+
+    return rows
+
+
+def flatten_br_status_rastreamento_detail(
+    status_rastreamento_raw: object,
+    ticket_id: str,
+) -> pd.DataFrame:
+    """DataFrame de detalhe para a aba **Brasil** a partir de ``status_rastreamento``.
+
+    Colunas: Código · Guru · TTR · Transportadora · Status.
+    Retorna DataFrame vazio (mas com colunas) quando não há dado parseável.
+    """
+    tid = _norm_ticket_id(ticket_id)
+    rows = _parse_status_rastreamento_br_carrier_dict(status_rastreamento_raw)
+    if not rows:
+        return pd.DataFrame(
+            columns=["ticket_id", "codigo_rastreio", "transportadora", "guru", "ttr_formatado", "status"]
+        )
+    df = pd.DataFrame(rows)
+    df.insert(0, "ticket_id", tid)
+    return df
+
+
 def _parse_status_rastreamento_json(raw: object) -> dict[str, int]:
-    """Conta códigos no JSON {codigo: status} por categoria interna."""
+    """Conta códigos no JSON por categoria interna.
+
+    Suporta dois formatos:
+    - **Brasil rico**: ``{Transportadora: [{code, status, ...}]}`` — conta cada objeto com ``code``.
+    - **Legado**: ``{code: status}`` — conta cada par.
+    """
     out = {
         "resolvido": 0,
         "pendente": 0,
@@ -639,6 +757,14 @@ def _parse_status_rastreamento_json(raw: object) -> dict[str, int]:
         "sem_status": 0,
         "outros": 0,
     }
+    if _is_br_carrier_dict(raw):
+        for seg in _parse_status_rastreamento_br_carrier_dict(raw):
+            cat = _normalize_tracking_status_value(seg.get("status"))
+            if cat in out:
+                out[cat] += 1
+            else:
+                out["outros"] += 1
+        return out
     base = _coerce_status_rastreamento_dict(raw)
     if not base:
         return out
@@ -2146,12 +2272,19 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
 
     _tr_raw = row.get("tracking_numbers_data") if "tracking_numbers_data" in row.index else None
     _st_raw = row.get("status_rastreamento") if "status_rastreamento" in row.index else None
-    detail_df = flatten_tracking_numbers_data_detail(
-        _tr_raw,
-        tid,
-        _st_raw,
-        for_argentina_tab=(tab == "argentina"),
-    )
+
+    # Brasil: usa parse específico para {Transportadora: [{code, status, lastUpdatedBy, ...}]}
+    _use_br_parse = (tab != "argentina") and _is_br_carrier_dict(_st_raw)
+    if _use_br_parse:
+        detail_df = flatten_br_status_rastreamento_detail(_st_raw, tid)
+    else:
+        detail_df = flatten_tracking_numbers_data_detail(
+            _tr_raw,
+            tid,
+            _st_raw,
+            for_argentina_tab=(tab == "argentina"),
+        )
+
     _n_fallback = 0
     if "total_qtd_rastreio" in row.index:
         try:
@@ -2159,16 +2292,22 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
         except (TypeError, ValueError):
             _n_fallback = 0
     if detail_df.empty:
-        detail_df = _detail_df_fallback_lines(tid, _n_fallback if _n_fallback > 0 else 1)
-        st.caption(
-            "Não foi possível ler **tracking_numbers_data** / **status_rastreamento**: "
-            "a tabela abaixo usa **-** nos campos sem dado. "
-            + (
-                f"Quantidade de linhas alinhada a **total_qtd_rastreio** ({_n_fallback})."
-                if _n_fallback > 0
-                else "Uma linha única com traços (sem total no recorte)."
+        if tab != "argentina":
+            st.info(
+                "Nenhum código de rastreio encontrado em **status_rastreamento** para este ticket. "
+                "Verifique se o campo está preenchido no Zendesk."
             )
-        )
+        else:
+            detail_df = _detail_df_fallback_lines(tid, _n_fallback if _n_fallback > 0 else 1)
+            st.caption(
+                "Não foi possível ler **tracking_numbers_data** / **status_rastreamento**: "
+                "a tabela abaixo usa **-** nos campos sem dado. "
+                + (
+                    f"Quantidade de linhas alinhada a **total_qtd_rastreio** ({_n_fallback})."
+                    if _n_fallback > 0
+                    else "Uma linha única com traços (sem total no recorte)."
+                )
+            )
 
     _cand = _ticket_ids_for_detail_select(df, tab)
     if len(_cand) > 1:
@@ -2190,38 +2329,50 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
             st.session_state["_ne_sync_pick_widget"] = tab
             st.rerun()
 
-    st.subheader("Tabela: código, guru, TTR, transportadora, status")
-    _status_cells = _ne_status_display_cells(detail_df, tab=tab)
-    _disp = pd.DataFrame(
-        {
-            "Código": detail_df["codigo_rastreio"].map(_ne_dash_cell),
-            "Guru": detail_df["guru"].map(_ne_dash_cell),
-            "TTR": detail_df["ttr_formatado"].map(_ne_dash_cell),
-            "Transportadora": detail_df["transportadora"].map(_ne_dash_cell),
-            "Status": _status_cells,
-        }
-    )
-    # Só texto — evita falha na serialização Arrow; sem ``disabled=`` (não existe na API atual).
-    _disp = _disp.astype(str)
-    st.dataframe(
-        _disp,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Código": st.column_config.TextColumn("Código", width="large"),
-            "Guru": st.column_config.TextColumn("Guru", width="medium"),
-            "TTR": st.column_config.TextColumn(
-                "TTR",
-                help="Tempo até resolução quando há datas no JSON de rastreio.",
-            ),
-            "Transportadora": st.column_config.TextColumn("Transportadora", width="medium"),
-            "Status": st.column_config.TextColumn(
-                "Status",
-                help="Valor do Zendesk e/ou categoria agrupada.",
-                width="large",
-            ),
-        },
-    )
+    if not detail_df.empty:
+        st.subheader("Tabela: código, guru, TTR, transportadora, status")
+        if _use_br_parse:
+            # Formato Brasil: colunas mapeadas direto do parse BR
+            _disp = pd.DataFrame(
+                {
+                    "Código": detail_df["codigo_rastreio"].map(_ne_dash_cell),
+                    "Guru": detail_df["guru"].map(_ne_dash_cell),
+                    "TTR": detail_df["ttr_formatado"].map(_ne_dash_cell),
+                    "Transportadora": detail_df["transportadora"].map(_ne_dash_cell),
+                    "Status": detail_df["status"].map(_ne_dash_cell),
+                }
+            )
+        else:
+            _status_cells = _ne_status_display_cells(detail_df, tab=tab)
+            _disp = pd.DataFrame(
+                {
+                    "Código": detail_df["codigo_rastreio"].map(_ne_dash_cell),
+                    "Guru": detail_df["guru"].map(_ne_dash_cell),
+                    "TTR": detail_df["ttr_formatado"].map(_ne_dash_cell),
+                    "Transportadora": detail_df["transportadora"].map(_ne_dash_cell),
+                    "Status": _status_cells,
+                }
+            )
+        _disp = _disp.astype(str)
+        st.dataframe(
+            _disp,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Código": st.column_config.TextColumn("Código", width="large"),
+                "Guru": st.column_config.TextColumn("Guru", width="medium"),
+                "TTR": st.column_config.TextColumn(
+                    "TTR",
+                    help="Tempo decorrido desde detectedAt (em aberto) ou duração até conclusão.",
+                ),
+                "Transportadora": st.column_config.TextColumn("Transportadora", width="medium"),
+                "Status": st.column_config.TextColumn(
+                    "Status",
+                    help="Status do rastreio conforme Zendesk.",
+                    width="large",
+                ),
+            },
+        )
 
     zurl = str(cfg.get("zendesk_ticket_url_template") or "").strip()
     if zurl and "{ticket_id}" in zurl:
