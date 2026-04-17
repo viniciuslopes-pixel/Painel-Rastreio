@@ -1,5 +1,5 @@
 {
-  "_instrucoes": "Copie para nuvem_envio_rastreio_config.json. filtro_grupo_contem: OR em substrings do nome do grupo Zendesk. Argentina: só o time (ex.: [AR] Envio Nube); evite substring genérica tipo só \"envio nube\" (pode casar grupo BR). filtro_bu_contem na Argentina é ignorado na SQL — BU no Zendesk costuma ser igual entre países e puxava tickets BR. Tickets extra na query: incluir_ticket_ids (JSON), NE_INCLUIR_TICKET_IDS (.env) ou _EXTRA_TICKET_IDS_ARGENTINA_TEMP no código.",
+  "_instrucoes": "Copie para nuvem_envio_rastreio_config.json. filtro_grupo_contem: OR em substrings no nome do grupo Zendesk **e** nas tags do ticket (t.tags no lakehouse), para quando a tabela groups não replica o nome. Ex.: inclua também ne_team_br ou nuvem_envio se o time sumir do join. Argentina: só o time (ex.: [AR] Envio Nube); evite substring genérica tipo só \"envio nube\" (pode casar grupo BR). filtro_bu_contem na Argentina é ignorado na SQL — BU no Zendesk costuma ser igual entre países e puxava tickets BR. Tickets extra na query: incluir_ticket_ids (JSON), NE_INCLUIR_TICKET_IDS (.env) ou _EXTRA_TICKET_IDS_ARGENTINA_TEMP no código.",
   "catalog_schema": "seu_catalogo.seu_schema_zendesk",
   "dashboard_base_url": "",
   "zendesk_ticket_url_template": "https://SUA_INSTANCIA.zendesk.com/agent/tickets/{ticket_id}",

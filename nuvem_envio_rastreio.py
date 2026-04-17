@@ -207,13 +207,24 @@ def _sql_escape(s: str) -> str:
 
 
 def _grupo_substring_match_sql(grupos: list[str]) -> str:
-    """Substring no nome do grupo (case-insensitive), sem LIKE — evita metacaracteres em Databricks/Hive."""
+    """Substring (case-insensitive) no nome do grupo **e** em ``t.tags``.
+
+    Quando a tabela ``groups`` no lakehouse não tem a linha do ``group_id``, ``g.name`` fica vazio
+    e o ticket sumia do painel mesmo com time correto no Zendesk; ``tags`` costuma trazer marcadores
+    (ex.: ``ne_team_br``, ``nuvem_envio_br``). Sem LIKE — evita metacaracteres em Databricks/Hive.
+    """
+    hay = "lower(concat(' ', coalesce(cast(g.name as string), ''), ' ', coalesce(cast(t.tags as string), ''), ' '))"
     parts: list[str] = []
     for g in grupos:
-        needle = _sql_escape(str(g).lower())
-        parts.append(
-            f"locate('{needle}', lower(cast(coalesce(g.name, '') as string))) > 0"
-        )
+        n = str(g).strip()
+        if not n:
+            continue
+        needle = _sql_escape(n.lower())
+        clause = f"locate('{needle}', {hay}) > 0"
+        if " " in n:
+            needle_us = _sql_escape(n.lower().replace(" ", "_"))
+            clause = f"({clause} OR locate('{needle_us}', {hay}) > 0)"
+        parts.append(clause)
     return " OR ".join(parts)
 
 
@@ -501,6 +512,7 @@ SELECT
     CAST(t.created_at AS TIMESTAMP) AS created_at,
     CAST(t.updated_at AS TIMESTAMP) AS updated_at,
     COALESCE(g.name, CAST(t.group_id AS STRING)) AS grupo,
+    cast(coalesce(t.tags, '') as string) AS _ne_grupo_haystack_tags,
     p.bu,
     {_extra_select_sql},
     {total_qtd_sql}
@@ -719,6 +731,8 @@ def fetch_dataframe(
                 df = df.loc[keep].copy().reset_index(drop=True)
     if str(cfg.get("data_model") or "").strip() == DATA_MODEL_AR and not df.empty:
         df = _enforce_ar_tab_row_filter(df, cfg)
+    if "_ne_grupo_haystack_tags" in df.columns:
+        df = df.drop(columns=["_ne_grupo_haystack_tags"])
     return df
 
 
@@ -737,9 +751,13 @@ def _enforce_ar_tab_row_filter(df: pd.DataFrame, cfg: dict[str, Any]) -> pd.Data
         return df
     allowed = set(_ticket_ids_from_env_and_temp_ar(DATA_MODEL_AR, cfg))
     gcol = df["grupo"].fillna("").astype(str).str.lower()
+    if "_ne_grupo_haystack_tags" in df.columns:
+        gcol = gcol + " " + df["_ne_grupo_haystack_tags"].fillna("").astype(str).str.lower()
     mask = pd.Series(False, index=df.index)
     for p in grupos:
         mask |= gcol.str.contains(p, regex=False, na=False)
+        if " " in p:
+            mask |= gcol.str.contains(p.replace(" ", "_"), regex=False, na=False)
     if allowed:
         tid = _normalize_ticket_id_series(df["ticket_id"])
         mask |= tid.isin(allowed)
