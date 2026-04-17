@@ -683,7 +683,7 @@ def _parse_status_rastreamento_br_carrier_dict(
                 if not code:
                     continue
                 guru_raw = str(item.get("lastUpdatedBy") or item.get("guru") or "").strip()
-                guru = _strip_nuvemshop_suffix(guru_raw) if guru_raw else "-"
+                guru = guru_raw if guru_raw else "-"
                 status = str(item.get("status") or "").strip() or "-"
                 detected_at = str(item.get("detectedAt") or "").strip()
                 ttr_txt = "-"
