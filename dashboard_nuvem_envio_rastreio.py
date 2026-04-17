@@ -2180,7 +2180,11 @@ def _ticket_ids_with_tracking(df: pd.DataFrame | None) -> list[str]:
             has_tr = bool(_parse_tracking_numbers_app_json(r.get("tracking_numbers_data")))
         has_st = False
         if "status_rastreamento" in r.index:
-            has_st = bool(_parse_status_rastreamento_items(r.get("status_rastreamento")))
+            _st = r.get("status_rastreamento")
+            if _is_br_carrier_dict(_st):
+                has_st = bool(_parse_status_rastreamento_br_carrier_dict(_st))
+            else:
+                has_st = bool(_parse_status_rastreamento_items(_st))
         if not has_tr and not has_st:
             continue
         x = _norm_ticket_id(r["ticket_id"])
@@ -2308,26 +2312,6 @@ def _render_ticket_codes_guru_panel(raw_cfg: dict, ticket_id: str, tab_key: str)
                     else "Uma linha única com traços (sem total no recorte)."
                 )
             )
-
-    _cand = _ticket_ids_for_detail_select(df, tab)
-    if len(_cand) > 1:
-        _psk = f"ne_panel_ticket_switch_{tab}"
-        try:
-            _pidx = _cand.index(tid)
-        except ValueError:
-            _pidx = 0
-        _alt = st.selectbox(
-            "Trocar ticket (mesmos dados carregados)",
-            options=_cand,
-            index=_pidx,
-            key=_psk,
-            help="Tickets com **status_rastreamento** (código→status) e/ou **tracking_numbers_data** nesta aba.",
-        )
-        if _norm_ticket_id(str(_alt)) != tid:
-            st.session_state["ne_codes_ticket"] = _norm_ticket_id(str(_alt))
-            st.session_state["ne_codes_tab"] = tab
-            st.session_state["_ne_sync_pick_widget"] = tab
-            st.rerun()
 
     if not detail_df.empty:
         st.subheader("Tabela: código, guru, TTR, transportadora, status")
@@ -3504,7 +3488,7 @@ def _render_ne_country_tab(raw_cfg: dict, tab_key: str) -> None:
                         st.session_state["_ne_sync_pick_widget"] = k
                         st.rerun()
 
-            if "tracking_numbers_data" in df.columns:
+            if "tracking_numbers_data" in df.columns or "status_rastreamento" in df.columns:
                 _tk_opts = _ticket_ids_for_detail_select(df, k)
                 if _tk_opts:
                     _sel_key = f"ne_ticket_codes_select_{k}"
