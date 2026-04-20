@@ -654,9 +654,8 @@ def fetch_dataframe(
     http_path = (os.getenv("databricks_http_path") or "").strip()
     if not token or not host or not http_path:
         raise RuntimeError(
-            "Defina databricks_token, databricks_host e databricks_http_path: arquivo .env na raiz "
-            "(veja .env.example), ou no Streamlit Community Cloud em Settings → Secrets "
-            "(mesmos nomes de chave). Opcional: NUVEM_DOTENV_PATH."
+            "Credenciais Databricks não configuradas: defina databricks_token, databricks_host e "
+            "databricks_http_path nas variáveis de ambiente ou nos Secrets do Streamlit Cloud."
         )
 
     raw = config or load_config()
